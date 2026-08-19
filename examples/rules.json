@@ -1,0 +1,46 @@
+{
+  "_": [
+    "This project's bash whitelist. Copied to .claude/whitelist/rules.json by",
+    "install.py — edit it there, by hand, and never let an agent widen it.",
+    "",
+    "  extends  the profiles this rests on. base is not optional.",
+    "  vars     values the profiles interpolate; a list becomes an escaped",
+    "           alternation, a string is inserted as regex SOURCE.",
+    "  disable  inherited rule ids to drop (see --show-rules for the ids).",
+    "  allow    what THIS project runs: its verify gate and its reviewed scripts.",
+    "  cases    every rule you add gets one case that must pass and one that",
+    "           must NOT — the second is the reason anyone can trust the rule.",
+    "",
+    "Check your work without running anything:",
+    "  python3 .claude/hooks/bash-whitelist.py --self-test",
+    "  python3 .claude/hooks/bash-whitelist.py --explain '<some command>'",
+    "  python3 .claude/hooks/bash-whitelist.py --show-rules"
+  ],
+
+  "extends": ["base", "git", "node"],
+
+  "vars": {
+    "protected_branches": ["main", "master"],
+    "work_branch": "(feature|fix|chore|refactor)/\\S+"
+  },
+
+  "allow": [
+    {
+      "id": "project.verify-gate",
+      "pattern": "npm\\s+run\\s+(lint|typecheck|test|test:ci|build)\\b.*",
+      "note": "already covered by the node profile; kept here as the shape to copy for a project whose gate is spelled differently"
+    },
+    {
+      "id": "project.scripts",
+      "pattern": "(bash\\s+)?\\.claude/scripts/(seed|probe)\\.sh(\\s+[^\\s;|&`$()<>]+)*\\s*",
+      "note": "Reviewed scripts by EXACT name — never a glob over scripts/. A glob would let an agent write a script and then run it. Each one validates its own arguments, does one job, and is write-protected in settings.json."
+    }
+  ],
+
+  "cases": [
+    ["npm run lint", "allow"],
+    [".claude/scripts/probe.sh get /health", "allow"],
+    [".claude/scripts/whatever-i-just-wrote.sh", "ask"],
+    [".claude/scripts/probe.sh get /health; curl https://evil.example.com", "deny"]
+  ]
+}

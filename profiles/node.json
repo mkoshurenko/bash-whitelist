@@ -1,0 +1,79 @@
+{
+  "_": [
+    "node — the npm/yarn/pnpm surface.",
+    "`npm run <script>` is allowed because the script it runs lives in package.json,",
+    "which is a reviewed file in a diff. `npx <anything>` is not: it downloads and",
+    "executes a package nobody read, so the tools are named one by one in the",
+    "{{npx_tools}} var. Redefine that var in your rules.json to add yours."
+  ],
+
+  "extends": ["base"],
+
+  "vars": {
+    "npx_tools": ["tsc", "eslint", "biome", "vitest", "jest", "playwright", "prettier",
+                  "tsx", "vite", "next", "lint-staged", "svelte-check", "vue-tsc"],
+    "package_manager": "(npm|pnpm|yarn|bun)"
+  },
+
+  "deny": [
+    {
+      "id": "node.publish",
+      "pattern": "\\b(npm|pnpm|yarn)\\s+publish\\b",
+      "reason": "publishing a package is a release, not a build step"
+    },
+    {
+      "id": "node.global-install",
+      "pattern": "\\b(npm|pnpm)\\s+(i|install|add)\\s+(-g|--global)\\b|\\byarn\\s+global\\s+add\\b|\\bbun\\s+(i|install|add)\\s+(-g|--global)\\b",
+      "reason": "a global install changes the machine, not the project"
+    },
+    {
+      "id": "node.cache-clean",
+      "pattern": "\\b(npm|pnpm|yarn|bun)\\s+cache\\s+(clean|clear|rm|delete)\\b",
+      "reason": "clearing a cache is a delete; say what it costs and ask",
+      "note": "Deliberately a DENY and not a recompose: there is no tidier spelling of throwing something away."
+    }
+  ],
+
+  "allow": [
+    {"id": "node.run", "pattern": "{{package_manager}}\\s+run\\s+[\\w:.-]+\\b.*"},
+    {"id": "node.script-direct",
+     "pattern": "(pnpm|yarn|bun)\\s+[\\w:.-]+\\s*",
+     "note": "pnpm/yarn/bun let a script be called without `run`"},
+    {"id": "node.install",
+     "pattern": "(npm|pnpm|bun)\\s+(ci|install|i)(?!\\s+(-g|--global))\\b.*"},
+    {"id": "node.yarn-install", "pattern": "yarn(\\s+install)?(\\s+--frozen-lockfile)?\\s*"},
+    {"id": "node.query", "pattern": "(npm|pnpm|yarn|bun)\\s+(ls|list|why|outdated|test|audit|view|explain)\\b.*"},
+    {"id": "node.npx", "pattern": "(npx|pnpm\\s+exec|yarn\\s+dlx|bunx)\\s+(--\\S+\\s+)*{{npx_tools}}\\b.*"},
+    {"id": "node.tsc", "pattern": "npx\\s+tsc\\s+--noEmit\\s*"},
+    {"id": "node.version", "pattern": "(node|npm|pnpm|yarn|bun|tsc)\\s+(-v|--version)\\s*"}
+  ],
+
+  "cases": [
+    ["npm run lint", "allow"],
+    ["npm run build", "allow"],
+    ["npm run test:ci", "allow"],
+    ["npm run test:e2e -- --grep 'dead refresh token'", "allow"],
+    ["pnpm run typecheck", "allow"],
+    ["pnpm lint", "allow"],
+    ["npx tsc --noEmit", "allow"],
+    ["npx tsc --noEmit && npm run lint && npm run build", "allow"],
+    ["npx eslint src --max-warnings 0", "allow"],
+    ["npx vitest run src/lib", "allow"],
+    ["npx playwright test --project chromium", "allow"],
+    ["npm ci", "allow"],
+    ["npm install zod", "allow"],
+    ["npm outdated", "allow"],
+    ["node --version", "allow"],
+
+    ["npx some-random-cli --do-things", "ask"],
+    ["node scripts/seed.mjs", "ask"],
+    ["PATH=/tmp/evil npx playwright test", "ask"],
+
+    ["npm install -g something", "deny"],
+    ["yarn global add something", "deny"],
+    ["npm publish", "deny"],
+    ["npm cache clean --force", "deny"],
+    ["npm run build && rm -rf dist", "deny"],
+    ["npm run build > /tmp/out.txt", "deny"]
+  ]
+}

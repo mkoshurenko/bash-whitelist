@@ -1,0 +1,9 @@
+{
+  "_": [
+    "The chain used when a project has no rules.json of its own — so a freshly",
+    "copied hook still decides something sane instead of failing open.",
+    "A real project should have its own .claude/whitelist/rules.json; see",
+    "examples/rules.json."
+  ],
+  "extends": ["base", "git", "node"]
+}

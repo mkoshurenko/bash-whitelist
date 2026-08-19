@@ -1,0 +1,66 @@
+{
+  "_": [
+    "git-branch-policy — 'work happens on these branches, never on those'.",
+    "",
+    "Extends git.json and REPLACES its three branch-shaped allow rules with ones",
+    "pinned to {{work_branch}}, so a merge or a checkout that names anything else",
+    "falls through to the human instead of running.",
+    "",
+    "Override the two vars in your rules.json:",
+    "  \"vars\": {",
+    "    \"protected_branches\": [\"main\", \"master\", \"develop\"],",
+    "    \"work_branch\": \"feature/\\\\S+\"        <- regex SOURCE, not a literal",
+    "  }",
+    "A list var becomes an escaped alternation; a string var is inserted raw."
+  ],
+
+  "extends": ["git"],
+  "disable": ["git.switch-any", "git.checkout-new-any", "git.merge-no-ff-any"],
+
+  "vars": {
+    "protected_branches": ["main", "master"],
+    "work_branch": "(feature|fix|chore|refactor)/\\S+"
+  },
+
+  "deny": [
+    {
+      "id": "git-policy.checkout-protected",
+      "pattern": "\\bgit\\s+(checkout|switch)\\s+(-\\S+\\s+)*{{protected_branches}}(\\s|$)",
+      "reason": "work happens on a work branch; the protected branches are not checked out by an agent"
+    },
+    {
+      "id": "git-policy.push-protected",
+      "pattern": "\\bgit\\s+push\\s+.*\\b{{protected_branches}}\\b",
+      "reason": "never push a protected branch"
+    }
+  ],
+
+  "allow": [
+    {"id": "git-policy.switch", "pattern": "git\\s+switch\\s+{{work_branch}}\\s*"},
+    {"id": "git-policy.checkout", "pattern": "git\\s+(checkout|switch)\\s+{{work_branch}}\\s*"},
+    {"id": "git-policy.create", "pattern": "git\\s+(checkout|switch)\\s+(-b|-c)\\s+{{work_branch}}\\s*"},
+    {"id": "git-policy.merge",
+     "pattern": "git\\s+merge\\s+--no-ff\\s+{{work_branch}}(\\s+(-m|--message)\\s+.*)?",
+     "note": "the branch is pinned even when a -m message follows it — a merge rule that only matched the branch as the LAST argument sent every real merge to a prompt"}
+  ],
+
+  "cases": [
+    ["git checkout -b feature/thing", "allow"],
+    ["git switch -c fix/thing", "allow"],
+    ["git switch feature/thing", "allow"],
+    ["git checkout refactor/thing", "allow"],
+    ["git merge --no-ff feature/thing", "allow"],
+    ["git merge --no-ff feature/thing -m \"merge: thing (why)\"", "allow"],
+
+    ["git checkout main", "deny"],
+    ["git switch master", "deny"],
+    ["git checkout -b main", "deny"],
+    ["git push origin main", "deny"],
+    ["git push --force origin main", "deny"],
+
+    ["git switch some-other-branch", "ask"],
+    ["git checkout -b wip", "ask"],
+    ["git merge --no-ff some-other-branch -m \"oops\"", "ask"],
+    ["git checkout src/index.ts", "ask"]
+  ]
+}

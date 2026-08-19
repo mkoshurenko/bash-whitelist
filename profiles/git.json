@@ -1,0 +1,153 @@
+{
+  "_": [
+    "git — the ordinary flow allowed, the irreversible refused.",
+    "The dividing line is not 'writes' vs 'reads': `git add` and `git commit` are",
+    "allowed because git remembers them. What is denied is what git cannot undo —",
+    "a discarded working tree, a deleted branch, a rewritten history, a force-push.",
+    "Branch NAME policy is not here: see git-branch-policy.json."
+  ],
+
+  "extends": ["base"],
+
+  "deny": [
+    {
+      "id": "git.no-verify",
+      "pattern": "--no-verify",
+      "reason": "pre-commit/pre-push hooks are the gate; --no-verify is not yours to use"
+    },
+    {
+      "id": "git.force-push",
+      "pattern": "\\bgit\\s+push\\s+.*(--force|-f\\b|\\+refs)",
+      "reason": "force-push rewrites shared history"
+    },
+    {
+      "id": "git.disable-hooks",
+      "pattern": "\\bhusky\\s+uninstall|\\bcore\\.hooksPath",
+      "reason": "disabling git hooks disables the gate"
+    },
+    {
+      "id": "git.remove-hooks",
+      "pattern": "\\brm\\s+[^|;&]*\\.(husky|git/hooks)",
+      "reason": "the git hooks are the gate"
+    },
+    {
+      "id": "git.reset-hard",
+      "pattern": "\\bgit\\s+reset\\s+--hard",
+      "reason": "destroys the working tree; use `git restore <file>` on purpose"
+    },
+    {
+      "id": "git.clean-force",
+      "pattern": "\\bgit\\s+clean\\s+-[a-z]*f",
+      "reason": "deletes untracked files irreversibly"
+    },
+    {
+      "id": "git.discard-everything",
+      "pattern": "\\bgit\\s+checkout\\s+--\\s+\\.|\\bgit\\s+restore\\s+\\.(\\s|$)",
+      "reason": "discards every uncommitted change"
+    },
+    {
+      "id": "git.branch-delete",
+      "pattern": "\\bgit\\s+branch\\s+-[dD]\\b",
+      "reason": "branch deletion is the human's call"
+    },
+    {
+      "id": "git.history-rewrite",
+      "pattern": "\\bgit\\s+(rebase|filter-branch|reflog\\s+delete|gc\\s+--prune)",
+      "reason": "history rewriting is the human's call"
+    },
+    {
+      "id": "git.stash-destroy",
+      "pattern": "\\bgit\\s+stash\\s+(drop|clear)",
+      "reason": "throws away stashed work"
+    },
+    {
+      "id": "git.global-config",
+      "pattern": "\\bgit\\s+config\\s+--global",
+      "reason": "do not touch the machine's global git config"
+    }
+  ],
+
+  "allow": [
+    {"id": "git.read",
+     "pattern": "git\\s+(status|log|diff|show|blame|describe|rev-parse|rev-list|ls-files|ls-remote|shortlog|remote|fetch|worktree\\s+list|stash\\s+list|config\\s+--get\\S*)\\b.*"},
+    {"id": "git.branch-list",
+     "pattern": "git\\s+branch(\\s+(-a|-r|-v|-vv|--list|--sort=\\S+|--format=\\S+|--show-current))*\\s*"},
+    {"id": "git.branch-query",
+     "pattern": "git\\s+branch(\\s+(-a|-r|--list|--format=\\S+))*\\s+(--contains|--merged|--no-merged|--points-at)(\\s+\\S+)?\\s*"},
+    {"id": "git.branch-list-glob",
+     "pattern": "git\\s+branch\\s+(-a\\s+)?--list\\s+\\S+\\s*"},
+    {"id": "git.tag-list", "pattern": "git\\s+tag\\s+(-l|--list)\\b.*"},
+    {"id": "git.safe-queries",
+     "pattern": "git\\s+(check-ignore|merge-base|reflog|worktree\\s+list)\\b.*",
+     "note": "read-only, and none of them can lose work"},
+
+    {"id": "git.stage", "pattern": "git\\s+(add|restore\\s+--staged)\\s+\\S.*"},
+    {"id": "git.commit", "pattern": "git\\s+commit(\\s+(-m|--message|-F|--file|--amend|-a))?\\b.*"},
+    {"id": "git.switch-any",
+     "pattern": "git\\s+switch\\s+(-c\\s+)?\\S+\\s*",
+     "note": "`switch` cannot be handed a path the way `checkout` can, so it cannot silently discard a file's edits. Plain `git checkout <branch>` is deliberately NOT here: `git checkout src/x.ts` has the same spelling and throws the file's changes away. Pin it by name in git-branch-policy.json if you want it."},
+    {"id": "git.checkout-new-any", "pattern": "git\\s+(checkout|switch)\\s+(-b|-c)\\s+\\S+\\s*"},
+    {"id": "git.pull-ff", "pattern": "git\\s+pull\\s+--ff-only\\b.*"},
+    {"id": "git.merge-no-ff-any", "pattern": "git\\s+merge\\s+--no-ff\\s+\\S+(\\s+(-m|--message)\\s+.*)?"},
+    {"id": "git.merge-ff-only", "pattern": "git\\s+merge\\s+--ff-only\\s+\\S+\\s*"},
+    {"id": "git.merge-abort", "pattern": "git\\s+merge\\s+--abort\\s*"},
+    {"id": "git.stash",
+     "pattern": "git\\s+stash\\s+(push|pop|apply|show)\\b.*",
+     "note": "stash is reversible by construction; `stash clear` is denied above"},
+    {"id": "git.worktree-add",
+     "pattern": "git\\s+worktree\\s+add\\s+\\S+(\\s+\\S+)*\\s*",
+     "note": "a worktree is how two sessions stop fighting over one checkout. `add` only creates; `remove` deletes a directory, so it stays off this list."}
+  ],
+
+  "cases": [
+    ["git status", "allow"],
+    ["git log --oneline -20", "allow"],
+    ["git diff --stat", "allow"],
+    ["git show HEAD --stat", "allow"],
+    ["git fetch origin", "allow"],
+    ["git branch --show-current", "allow"],
+    ["git branch -a --list 'feature/*'", "allow"],
+    ["git check-ignore -v build/out", "allow"],
+    ["git merge-base HEAD main", "allow"],
+    ["git reflog -5", "allow"],
+    ["git worktree list", "allow"],
+
+    ["git add src/lib/roles.ts", "allow"],
+    ["git commit -m \"feat(x): y\"", "allow"],
+    ["git commit -F .git/COMMIT_MSG", "allow"],
+    ["git switch -c feature/thing", "allow"],
+    ["git switch feature/thing", "allow"],
+    ["git checkout -b feature/thing", "allow"],
+    ["git pull --ff-only origin main", "allow"],
+    ["git merge --no-ff feature/thing", "allow"],
+    ["git merge --no-ff feature/thing -m \"merge: thing (why)\"", "allow"],
+    ["git merge --ff-only FETCH_HEAD", "allow"],
+    ["git merge --abort", "allow"],
+    ["git stash push -m wip", "allow"],
+    ["git stash pop", "allow"],
+    ["git worktree add ../wt feature/thing", "allow"],
+
+    ["git push origin feature/thing", "ask"],
+    ["git restore src/index.ts", "ask"],
+    ["git checkout -- e2e", "ask"],
+    ["git checkout src/index.ts", "ask"],
+    ["git rm -q docs/x.md", "ask"],
+    ["git worktree remove ../wt", "ask"],
+    ["git clean -n", "ask"],
+
+    ["git commit --no-verify -m \"skip\"", "deny"],
+    ["git push --no-verify origin x", "deny"],
+    ["git push --force origin main", "deny"],
+    ["git push -f origin feature/x", "deny"],
+    ["git reset --hard HEAD~3", "deny"],
+    ["git clean -fd", "deny"],
+    ["git restore .", "deny"],
+    ["git checkout -- .", "deny"],
+    ["git branch -D feature/x", "deny"],
+    ["git rebase -i HEAD~3", "deny"],
+    ["git stash clear", "deny"],
+    ["git config --global user.email x@y.z", "deny"],
+    ["rm .husky/pre-push", "deny"],
+    ["git status && git reset --hard", "deny"]
+  ]
+}

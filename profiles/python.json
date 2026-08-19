@@ -1,0 +1,60 @@
+{
+  "_": [
+    "python — test runners, linters, type checkers.",
+    "`python -m <module>` runs whatever module it is handed, so the modules are",
+    "named one by one in {{py_modules}} rather than allowed as a class. Redefine",
+    "that var in your rules.json to add yours.",
+    "Note that base.json already refuses `python -c` WITH the equivalent, so the",
+    "inline-snippet habit is answered before it reaches a human."
+  ],
+
+  "extends": ["base"],
+
+  "vars": {
+    "py_modules": ["pytest", "unittest", "mypy", "ruff", "black", "isort", "pip", "venv", "build"],
+    "py_tools": ["pytest", "ruff", "black", "isort", "mypy", "pyright", "flake8", "tox", "coverage"]
+  },
+
+  "deny": [
+    {
+      "id": "python.pip-system",
+      "pattern": "\\bpip3?\\s+install\\s+[^|;&]*(--user|--break-system-packages)\\b",
+      "reason": "installing outside the project's environment changes the machine"
+    },
+    {
+      "id": "python.pip-uninstall",
+      "pattern": "\\bpip3?\\s+uninstall\\b",
+      "reason": "removing a package is a delete; say what breaks and ask"
+    }
+  ],
+
+  "allow": [
+    {"id": "python.tools", "pattern": "{{py_tools}}\\b.*"},
+    {"id": "python.module", "pattern": "(python3?|uv\\s+run\\s+python3?)\\s+-m\\s+{{py_modules}}\\b.*"},
+    {"id": "python.uv-tool", "pattern": "(uv\\s+run|poetry\\s+run|pipenv\\s+run|hatch\\s+run)\\s+{{py_tools}}\\b.*"},
+    {"id": "python.uv-sync", "pattern": "uv\\s+(sync|lock|pip\\s+install)\\b.*"},
+    {"id": "python.pip-install",
+     "pattern": "(python3?\\s+-m\\s+)?pip3?\\s+install(?!\\s+[^|;&]*(--user|--break-system-packages))\\b.*"},
+    {"id": "python.version", "pattern": "(python3?|pip3?|uv|poetry)\\s+(-V|--version)\\s*"}
+  ],
+
+  "cases": [
+    ["pytest -q", "allow"],
+    ["pytest tests/test_gate.py -k denies", "allow"],
+    ["ruff check src", "allow"],
+    ["mypy src", "allow"],
+    ["python3 -m pytest -q", "allow"],
+    ["uv run pytest -q", "allow"],
+    ["uv sync", "allow"],
+    ["pip install -r requirements.txt", "allow"],
+    ["python3 --version", "allow"],
+
+    ["python3 manage.py migrate", "ask"],
+    ["python3 -m some_random_module", "ask"],
+
+    ["pip install --user requests", "deny"],
+    ["pip uninstall requests", "deny"],
+    ["python3 -c \"print(1)\"", "deny"],
+    ["pytest -q > /tmp/out.txt", "deny"]
+  ]
+}
