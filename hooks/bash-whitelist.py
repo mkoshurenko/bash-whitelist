@@ -568,9 +568,10 @@ def engine_checks():
         ("the gate explaining a shape does not run it",
          lambda: "rm -rf" in deny_view(
              "python3 .claude/hooks/bash-whitelist.py --explain 'rm -rf x'", no_exec), False),
-        ("...but a second segment after the explain is still read raw",
+        ("...but one segment that can execute and the whole chain is read raw, quotes included",
          lambda: "sudo" in deny_view(
-             "python3 .claude/hooks/bash-whitelist.py --explain 'ls'; sudo id", no_exec), True),
+             "python3 .claude/hooks/bash-whitelist.py --explain 'ls'; bash -c 'sudo id'",
+             no_exec), True),
         ("...and a foreign prefix on the real hook name does not count",
          lambda: "rm -rf" in deny_view(
              "python3 /tmp/evil/.claude/hooks/bash-whitelist.py --explain 'rm -rf x'",
