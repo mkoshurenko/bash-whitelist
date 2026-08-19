@@ -5,10 +5,10 @@
     python3 install.py /path/to/project --force   # overwrite files already there
     python3 install.py /path/to/project --dry-run # say what it would do
 
-It copies the hook, the profiles, the request script and the skill; writes a
+It copies both hooks, the profiles, the request script and the skill; writes a
 starter rules.json if the project has none; merges the hook wiring and the
 write-protection deny list into .claude/settings.json (keeping a .bak); and
-finishes by running the gate's own fixtures inside the target, because an
+finishes by running both sets of fixtures inside the target, because an
 installed gate nobody verified is a claim, not a guardrail.
 
 Nothing here deletes: an existing file is skipped and named unless --force, and
@@ -27,6 +27,7 @@ HERE = Path(__file__).resolve().parent
 
 COPIES = [
     ("hooks/bash-whitelist.py", ".claude/hooks/bash-whitelist.py"),
+    ("hooks/py-inline-guard.py", ".claude/hooks/py-inline-guard.py"),
     ("hooks/permission-audit.py", ".claude/hooks/permission-audit.py"),
     ("scripts/whitelist-request.py", ".claude/scripts/whitelist-request.py"),
     ("skills/bash-discipline/SKILL.md", ".claude/skills/bash-discipline/SKILL.md"),
@@ -40,6 +41,7 @@ RULES_TO = ".claude/whitelist/rules.json"
 PROTECT = [
     "./.claude/settings.json",
     "./.claude/hooks/bash-whitelist.py",
+    "./.claude/hooks/py-inline-guard.py",
     "./.claude/hooks/permission-audit.py",
     "./.claude/scripts/whitelist-request.py",
     "./.claude/whitelist/rules.json",
@@ -51,13 +53,17 @@ PROTECT = [
     "./.claude/whitelist/profiles/default.json",
 ]
 
-HOOK_WIRING = {
-    "PreToolUse": ("Bash", "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-whitelist.py\"",
-                   "Checking the command"),
-    "PermissionRequest": (None,
-                          "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-audit.py\" "
-                          "2>/dev/null || true", None),
-}
+# (event, matcher, command, statusMessage). A list and not a dict keyed by event:
+# PreToolUse carries two entries, and the second one is the reason the first can
+# be trusted about inline python at all.
+HOOK_WIRING = [
+    ("PreToolUse", "Bash", "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-whitelist.py\"",
+     "Checking the command"),
+    ("PreToolUse", "Bash", "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/py-inline-guard.py\"",
+     "Reading the inline python"),
+    ("PermissionRequest", None,
+     "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-audit.py\" 2>/dev/null || true", None),
+]
 
 GITIGNORE = [".claude/logs/", ".claude/whitelist/requests.jsonl"]
 
@@ -87,7 +93,7 @@ def wire_settings(root, dry, done):
             return False
 
     hooks = settings.setdefault("hooks", {})
-    for event, (matcher, command, status) in HOOK_WIRING.items():
+    for event, matcher, command, status in HOOK_WIRING:
         groups = hooks.setdefault(event, [])
         already = any(command.split("/")[-1].split('"')[0] in h.get("command", "")
                       for group in groups for h in group.get("hooks", []))
@@ -178,6 +184,13 @@ def main():
          "--rules", str(root / RULES_TO), "--self-test"],
         capture_output=True, text=True)
     print(result.stdout.strip() or result.stderr.strip())
+
+    guard = subprocess.run(
+        [sys.executable, str(root / ".claude/hooks/py-inline-guard.py"), "--self-test"],
+        capture_output=True, text=True)
+    print(guard.stdout.strip() or guard.stderr.strip())
+    if guard.returncode != 0:
+        result = guard
 
     print("\nNext, by hand — the parts nobody else can do for you:")
     print("  1. .claude/whitelist/rules.json: replace the example `allow` entries with")

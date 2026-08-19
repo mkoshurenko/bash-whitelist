@@ -68,12 +68,55 @@ deny list; and runs the fixtures. It overwrites nothing without `--force`.
 ```
 .claude/
   hooks/bash-whitelist.py          the engine — no rules inside it
+  hooks/py-inline-guard.py         reads the Python that `python3 -c` runs
   hooks/permission-audit.py        logs what still needed a human; --report reads it back
   scripts/whitelist-request.py     how an agent asks for a rule instead of a keypress
   whitelist/rules.json             THIS project's policy — the file you edit
   whitelist/profiles/*.json        base · git · git-branch-policy · node · python
   skills/bash-discipline/SKILL.md  how an agent composes a command that passes
 ```
+
+## The second hook: reading the body, not the line
+
+`base` refuses `python3 -c` outright, and for a repo with no Python that is the
+right answer. For a repo where an agent reads a build report, a settings file or
+a log, it is the rule that gets worked around — so `py-inline-guard.py` exists to
+make allowing `-c` defensible instead of optional.
+
+It parses the body with `ast` and judges it by an ALLOW-list: the imports a
+data-reading snippet needs, `open()` in a read mode only, no dunder attribute, no
+`eval`/`getattr`, nothing that deletes or opens a socket. `os`, `subprocess` and
+`shutil` are simply absent, which is why `getattr(os, "sy" + "stem")` loses here
+and wins against any denylist of words. A script under a temp directory gets the
+same reading: a throwaway parser written minutes ago is the same unreviewed body,
+only longer.
+
+To use it, fork `base.inline-interpreter` in your `rules.json` rather than
+dropping it — keep the refusal for `node`/`ruby`/`perl`, allow `python3 -c`, and
+let the guard judge what is inside:
+
+```json
+{
+  "disable": ["base.inline-interpreter"],
+  "recompose": [
+    {"id": "project.inline-interpreter",
+     "pattern": "(^|[;&|])\\s*(\\w+=\\S+\\s+)*(node|ruby|perl)\\s+(-\\S+\\s+)*-{1,2}(c|e|eval)\\b",
+     "why": "inline interpreter code is arbitrary code with a quiet spelling",
+     "instead": "use the Read/Write/Edit tools"}
+  ],
+  "allow": [
+    {"id": "project.python-inline",
+     "pattern": "python3?(\\s+-[A-Za-z]+)*\\s+-c\\s+(?:'[^']*'|\"[^\"`$]*\")(\\s+{{arg}})*\\s*"}
+  ]
+}
+```
+
+Leave `base.program-on-stdin` on. `… | python3 -` takes its program from stdin,
+where no `PreToolUse` hook can read it, so there is nothing for the guard to
+judge — the one shape it cannot cover is the one shape that must stay refused.
+
+What it does not do: it constrains writing and executing, not reading.
+`print(open("x").read())` is allowed for any readable file except `.env`.
 
 ## Writing the rules
 
@@ -119,9 +162,16 @@ The profiles:
 python3 .claude/hooks/bash-whitelist.py --self-test          # engine fixtures + every case
 python3 .claude/hooks/bash-whitelist.py --explain '<cmd>'    # verdict and reason, runs nothing
 python3 .claude/hooks/bash-whitelist.py --show-rules         # the merged chain, ids and all
+python3 .claude/hooks/py-inline-guard.py --self-test         # the inline-body fixtures
+python3 .claude/hooks/py-inline-guard.py --explain '<cmd>'   # what the guard thinks of one body
 python3 .claude/hooks/permission-audit.py --report           # what keeps costing a prompt
 python3 .claude/scripts/whitelist-request.py --self-test     # the "could this authorise rm" probes
 ```
+
+`--explain` works on a shape a DENY rule covers: a `--`-flagged call to one of
+these hooks has its quoted argument blanked before the deny rules read it, the
+same way a `grep` haystack is. It is one segment only — `--explain 'ls'; sudo id`
+is still scanned raw and still denied.
 
 `--report` is how the rules get curated: each line is a rule you have not
 written yet. Widen deliberately, never to silence a prompt.

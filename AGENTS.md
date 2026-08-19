@@ -44,14 +44,16 @@ It copies:
 | To | What |
 |---|---|
 | `.claude/hooks/bash-whitelist.py` | the engine — no rules inside it |
+| `.claude/hooks/py-inline-guard.py` | reads the Python that `python3 -c` runs |
 | `.claude/hooks/permission-audit.py` | the prompt log and its `--report` reader |
 | `.claude/scripts/whitelist-request.py` | how a rule gets asked for |
 | `.claude/whitelist/profiles/*.json` | the shipped rule profiles |
 | `.claude/whitelist/rules.json` | this project's policy — the file you edit |
 | `.claude/skills/bash-discipline/SKILL.md` | how an agent composes a command |
 
-…wires both hooks into `.claude/settings.json`, adds the write-protection deny
-list, appends two lines to `.gitignore`, and runs the gate's own fixtures. It
+…wires all three hooks into `.claude/settings.json` (two `PreToolUse(Bash)`, one
+`PermissionRequest`), adds the write-protection deny list, appends two lines to
+`.gitignore`, and runs both sets of fixtures. It
 never overwrites an existing file unless you pass `--force`; anything it kept is
 printed by name.
 
@@ -59,6 +61,7 @@ printed by name.
 
 ```sh
 python3 .claude/hooks/bash-whitelist.py --self-test
+python3 .claude/hooks/py-inline-guard.py --self-test
 python3 .claude/hooks/bash-whitelist.py --explain 'git push --force origin main'
 python3 .claude/hooks/bash-whitelist.py --explain 'npm run build'
 ```
