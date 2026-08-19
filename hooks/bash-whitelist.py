@@ -341,6 +341,22 @@ ENV_PATH = re.compile(r"""^['"](\S*/)?\.env(\.[\w.-]+)?['"]$""")
 # A leading `VAR=value` is an environment prefix, not the program being run.
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# The gate inspecting itself. `--explain 'rm -rf x'` names a shape; it does not
+# run one, so its quoted argument is a haystack exactly like grep's. Without
+# this, the one question worth asking before typing — "what would this get?" —
+# is refused for every shape a DENY rule covers, and the answer has to be
+# guessed instead.
+#
+# This MUST stay no looser than the `base.gate-self` ALLOW rule. A spelling this
+# recognises but that rule does not gets its quotes blanked and then fails to
+# match any allow — turning a hard DENY on `sudo rm -rf /` into an ASK, which is
+# a keypress where there used to be a wall. So: `python3` exactly, the path
+# exactly, no leading directory, no `.next` staging copy. Verifying a staged copy
+# is what `--rules <copy> --self-test` is for.
+GATE_SELF = re.compile(
+    r"^\s*python3\s+\.claude/hooks/(?:bash-whitelist|py-inline-guard|permission-audit)"
+    r"\.py\s+--\S")
+
 
 def split_segments(text):
     """Split a chain on `&& || ; | \\n`, ignoring separators inside quotes.
@@ -421,11 +437,18 @@ def deny_view(text, no_exec):
     quotes, so blanking them there would be the loosening this must not be.
     Blanking is also all-or-nothing per chain — one non-no-exec segment and the
     whole string is scanned raw, so nothing rides in on a leading `grep`.
+
+    A `--explain`/`--self-test` call on one of these hooks counts as a no-exec
+    segment for this purpose: it prints a verdict and runs nothing, so the shape
+    it quotes is a haystack. Without it `--explain 'rm -rf x'` is refused for
+    naming the shape it was asked about, which makes the cheap way to aim
+    unavailable for exactly the rules worth aiming at. The all-or-nothing rule is
+    unchanged, so `… --explain 'ls'; sudo id` still gets scanned raw and denies.
     """
     if EXEC_FLAGS.search(text):
         return text
     segments = [s.strip() for s in split_segments(FD_DUP.sub("", text)) if s.strip()]
-    if segments and all(argv0(s) in no_exec for s in segments):
+    if segments and all(argv0(s) in no_exec or GATE_SELF.match(s) for s in segments):
         return QUOTED.sub(blank_haystack, text)
     return text
 
@@ -542,6 +565,23 @@ def engine_checks():
          lambda: ".env" in deny_view('grep -n . ".env"', no_exec), True),
         ("--pre makes ripgrep a launcher, not a haystack",
          lambda: "sudo" in deny_view('rg --pre "sudo" src', no_exec), True),
+        ("the gate explaining a shape does not run it",
+         lambda: "rm -rf" in deny_view(
+             "python3 .claude/hooks/bash-whitelist.py --explain 'rm -rf x'", no_exec), False),
+        ("...but a second segment after the explain is still read raw",
+         lambda: "sudo" in deny_view(
+             "python3 .claude/hooks/bash-whitelist.py --explain 'ls'; sudo id", no_exec), True),
+        ("...and a foreign prefix on the real hook name does not count",
+         lambda: "rm -rf" in deny_view(
+             "python3 /tmp/evil/.claude/hooks/bash-whitelist.py --explain 'rm -rf x'",
+             no_exec), True),
+        ("...nor `python` without the 3, which the allow rule does not accept either",
+         lambda: "rm -rf" in deny_view(
+             "python .claude/hooks/bash-whitelist.py --explain 'rm -rf x'", no_exec), True),
+        ("...nor a staged .next copy, which is not the installed gate",
+         lambda: "rm -rf" in deny_view(
+             "python3 .claude/hooks/bash-whitelist.next.py --explain 'rm -rf x'",
+             no_exec), True),
         ("2>&1 is not a redirect into a file",
          lambda: FD_DUP.sub("", "cmd --flag 2>&1"), "cmd --flag "),
         ("a list variable becomes an escaped alternation",
