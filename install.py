@@ -5,11 +5,11 @@
     python3 install.py /path/to/project --force   # overwrite files already there
     python3 install.py /path/to/project --dry-run # say what it would do
 
-It copies both hooks, the profiles, the request script and the skill; writes a
-starter rules.json if the project has none; merges the hook wiring and the
-write-protection deny list into .claude/settings.json (keeping a .bak); and
-finishes by running both sets of fixtures inside the target, because an
-installed gate nobody verified is a claim, not a guardrail.
+It copies the three hooks, the profiles, the request script and the skill; writes
+a starter rules.json and advice.json if the project has none; merges the hook
+wiring and the write-protection deny list into .claude/settings.json (keeping a
+.bak); and finishes by running all three sets of fixtures inside the target,
+because an installed gate nobody verified is a claim, not a guardrail.
 
 Nothing here deletes: an existing file is skipped and named unless --force, and
 settings.json is rewritten only after its previous content is copied to
@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 COPIES = [
     ("hooks/bash-whitelist.py", ".claude/hooks/bash-whitelist.py"),
     ("hooks/py-inline-guard.py", ".claude/hooks/py-inline-guard.py"),
+    ("hooks/bash-advise.py", ".claude/hooks/bash-advise.py"),
     ("hooks/permission-audit.py", ".claude/hooks/permission-audit.py"),
     ("scripts/whitelist-request.py", ".claude/scripts/whitelist-request.py"),
     ("skills/bash-discipline/SKILL.md", ".claude/skills/bash-discipline/SKILL.md"),
@@ -36,12 +37,18 @@ COPIES = [
 PROFILES_TO = ".claude/whitelist/profiles"
 RULES_TO = ".claude/whitelist/rules.json"
 
+# The advice table the advisor reads. It ships as an example and is meant to be
+# edited in place, so it is copied like rules.json — not overwritten on reinstall
+# — and it is deliberately absent from PROTECT: it changes no verdict.
+ADVICE_TO = ".claude/whitelist/advice.json"
+
 # Everything an agent must not be able to edit. A gate whose own file is
 # writable is a suggestion: six deleted lines and the leash is gone.
 PROTECT = [
     "./.claude/settings.json",
     "./.claude/hooks/bash-whitelist.py",
     "./.claude/hooks/py-inline-guard.py",
+    "./.claude/hooks/bash-advise.py",
     "./.claude/hooks/permission-audit.py",
     "./.claude/scripts/whitelist-request.py",
     "./.claude/whitelist/rules.json",
@@ -61,6 +68,8 @@ HOOK_WIRING = [
      "Checking the command"),
     ("PreToolUse", "Bash", "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/py-inline-guard.py\"",
      "Reading the inline python"),
+    ("PreToolUse", "Bash", "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-advise.py\"",
+     "Explaining the verdict"),
     ("PermissionRequest", None,
      "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/permission-audit.py\" 2>/dev/null || true", None),
 ]
@@ -164,6 +173,8 @@ def main():
         copy(profile, root / PROFILES_TO / profile.name, args.force, args.dry_run, done, skipped)
     copy(HERE / "examples" / "rules.json", root / RULES_TO, args.force, args.dry_run,
          done, skipped)
+    copy(HERE / "examples" / "advice.json", root / ADVICE_TO, args.force, args.dry_run,
+         done, skipped)
 
     if not wire_settings(root, args.dry_run, done):
         return 2
@@ -191,6 +202,13 @@ def main():
     print(guard.stdout.strip() or guard.stderr.strip())
     if guard.returncode != 0:
         result = guard
+
+    advisor = subprocess.run(
+        [sys.executable, str(root / ".claude/hooks/bash-advise.py"), "--self-test"],
+        capture_output=True, text=True, cwd=str(root))
+    print(advisor.stdout.strip() or advisor.stderr.strip())
+    if advisor.returncode != 0:
+        result = advisor
 
     print("\nNext, by hand — the parts nobody else can do for you:")
     print("  1. .claude/whitelist/rules.json: replace the example `allow` entries with")

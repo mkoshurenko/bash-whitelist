@@ -1,6 +1,6 @@
 ---
 name: bash-discipline
-description: How to compose a Bash call in this repo so it passes the whitelist gate — the shapes that always pass, the shapes that never will and what to write instead, why a permission prompt is a defect and not a feature, what deletion owes the human before it is proposed, and how to request a new rule when nothing allowed does the job. Use when about to write any Bash command, run a script or an inline python3/node snippet, when a call has just been refused or has cost a permission prompt, when tempted to delete files or clear a cache, and when curating .claude/whitelist/rules.json.
+description: How to compose a Bash call in this repo so it passes the whitelist gate — the shapes that always pass, the shapes that never will and what to write instead, how to act on each of the three things bash-advise tells you when a call is ASK'd, why a permission prompt is a defect and not a feature, what deletion owes the human before it is proposed, and how to request a new rule when nothing allowed does the job. Use when about to write any Bash command, run a script or an inline python3/node snippet, when a call has just been refused or has cost a permission prompt, when tempted to delete files or clear a cache, and when curating .claude/whitelist/rules.json.
 ---
 
 # Bash discipline: aim before you type
@@ -24,20 +24,44 @@ fifty-first.
 2. `deny` refuses outright and is not negotiable.
 3. A **recompose** rule refuses **and names the allowed equivalent** — that
    reason comes back to you, so act on it instead of retrying a variant.
-4. Everything else asks the human, and the reason quotes the `allow` rules that
-   mention your program.
+4. Everything else asks the human. The dialog they see quotes the `allow` rules
+   that mention your program; what comes back to **you** is `bash-advise`, and it
+   says one of three things.
+
+## What `bash-advise` tells you, and what to do with each
+
+It speaks only on `ask`, and it decides nothing — the human still approves.
+
+| It says | Do |
+|---|---|
+| `rewrite as: <form>` | write that form. It was checked against this project's rules, so it passes. |
+| `the blocker is <a smuggler>` | split the line: run the inner command on its own, use the value in the next call. |
+| `no allowed rewrite is known for: <program>` | **stop composing variants.** Let the prompt stand and say, in one line, what the call does and why the task needs it. If the shape will recur, file the rule. |
+
+The third one is the one to take literally. A second attempt at a shape that has
+no allowed form spends a human's attention twice for the same decision, and the
+audit log is full of exactly that.
+
+Its own advice table is `.claude/whitelist/advice.json`, and unlike the rules it
+is **not** write-protected: it produces a sentence, never a verdict. If a shape
+cost you a prompt and the advice was missing or wrong, fixing the entry is in
+scope — that is the file's purpose. Fixing `rules.json` is not; that is a patch
+for a human.
 
 ## Two commands worth knowing before the rest
 
 ```sh
 python3 .claude/hooks/bash-whitelist.py --explain 'git push origin feature/x'
 python3 .claude/hooks/bash-whitelist.py --show-rules
+python3 .claude/hooks/bash-advise.py --explain 'git checkout release-2'
 ```
 
 `--explain` prints the verdict and the reason without running anything. Use it
 when unsure — it is free, and it is the difference between aiming and guessing.
 `--show-rules` prints the merged rule chain, which is the only description of
-the policy that cannot go stale.
+the policy that cannot go stale. The advisor's `--explain` prints the advice an
+`ask` would carry, which is the faster question when you already expect a prompt
+and want to know whether an allowed form exists at all.
 
 ## Shapes that pass
 

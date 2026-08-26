@@ -1,0 +1,84 @@
+{
+  "_": [
+    "advice — what `bash-advise.py` tells the AGENT when the gate returns ASK.",
+    "",
+    "This file changes no verdict. It cannot allow, deny or rewrite a call; it only",
+    "produces a sentence. That is why it is NOT on the Edit/Write deny list that",
+    "the hooks, the profiles and rules.json are on — an agent that edits its own",
+    "advice has misled itself and nothing else.",
+    "",
+    "One entry: {id, match, instead, why}. `match` is searched (not fullmatched)",
+    "against each segment the ALLOW rules rejected; the first hit wins, so put the",
+    "specific shapes above the general ones. `instead` must name a form that is",
+    "genuinely on this project's whitelist, or say plainly that none exists — an",
+    "entry that invents a spelling sends the agent hunting, which is the failure",
+    "this hook was written to stop.",
+    "",
+    "Two entry kinds, and keep them distinguishable:",
+    "  a rewrite  — an allowed form does the same work. Name it.",
+    "  a real ask — the prompt IS the design (it discards work, deletes, pushes,",
+    "               installs). Then `instead` says what the human needs to hear",
+    "               before approving, not how to get around the prompt.",
+    "",
+    "This file is a starting point. Curate it from",
+    "`permission-audit.py --report`: every shape on that list either earns a rule",
+    "or earns an entry here."
+  ],
+
+  "advice": [
+    {
+      "id": "advice.git-checkout-path",
+      "match": "\\bgit\\s+(checkout\\s+\\S+\\s+--\\s|checkout\\s+--(ours|theirs)\\b|restore\\s+(?!--staged)\\S)",
+      "instead": "nothing — this prompt is the design. Before it, say which files will be overwritten and whether any of them has uncommitted edits (`git status --short PATH`, which is allowed).",
+      "why": "checking a path out of a ref discards that file's working-tree changes and git keeps no copy, so the human is the only undo"
+    },
+    {
+      "id": "advice.git-checkout-ref",
+      "match": "\\bgit\\s+checkout\\s+(?!-b\\b|-c\\b)\\S+\\s*$",
+      "instead": "git switch BRANCH, or git switch -c BRANCH to create one",
+      "why": "plain `git checkout X` is off the list because `git checkout src/File.ts` has the same spelling and throws that file's edits away; `switch` cannot be handed a path"
+    },
+    {
+      "id": "advice.git-dir",
+      "match": "\\bgit\\s+-C\\s",
+      "instead": "drop the -C and run the bare `git VERB` if the target is this checkout. For another repository there is no allowed form unless this project added one.",
+      "why": "every git allow rule is anchored on `git VERB`, with no tolerance for the -C prefix"
+    },
+    {
+      "id": "advice.git-push",
+      "match": "\\bgit\\s+push\\b",
+      "instead": "nothing — pushing is the human's call. Name the branch and the remote in one line so the approval is informed.",
+      "why": "a push is the first irreversible step outside this machine"
+    },
+    {
+      "id": "advice.git-rm",
+      "match": "\\bgit\\s+rm\\b",
+      "instead": "nothing — deletion always prompts. Say what the file is and what still references it (an allowed `git grep` will tell you) before asking.",
+      "why": "an equivalent turns a stop into a detour, and there is no equivalent for removing a file"
+    },
+    {
+      "id": "advice.process",
+      "match": "^\\s*(ps|pgrep|pkill|kill)\\b",
+      "instead": "for a command you started in the background, read its output with the Monitor tool instead of inspecting the process table.",
+      "why": "the read-only allow set covers the filesystem but was never extended to the process table"
+    },
+    {
+      "id": "advice.env-prefix",
+      "match": "^\\s*[A-Za-z_][A-Za-z0-9_]*=",
+      "instead": "drop the variable: put the literal value in the command, or make the value its own call and use the result.",
+      "why": "an assignment is not a program, so there is no argv0 for a rule to match; only a one-shot `VAR=value cmd` prefix is understood, and nothing on the allow list accepts one"
+    },
+    {
+      "id": "advice.install",
+      "match": "^\\s*(brew|apt(-get)?|npm\\s+i(nstall)?\\b|yarn\\s+add\\b|pip3?\\s+install\\b|cargo\\s+install\\b|go\\s+install\\b)",
+      "instead": "nothing — installing changes the machine, so it prompts. Say which tool, which version, and why the task cannot proceed without it.",
+      "why": "an install is outside the repository and outlives the session"
+    },
+    {
+      "id": "advice.cd-self",
+      "match": "^\\s*cd\\s",
+      "instead": "nothing — you are already in the project root. If you need another directory, most tools take a path argument (`git -C`, `rg PATH`, `--cwd`) and a path argument is one segment instead of two.",
+      "why": "`cd X && cmd` is two segments, and the second one is judged with no memory of the first, so the chain is only as allowed as its weakest half"
+    }
+  ]
+}

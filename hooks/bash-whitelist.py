@@ -354,8 +354,8 @@ ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # exactly, no leading directory, no `.next` staging copy. Verifying a staged copy
 # is what `--rules <copy> --self-test` is for.
 GATE_SELF = re.compile(
-    r"^\s*python3\s+\.claude/hooks/(?:bash-whitelist|py-inline-guard|permission-audit)"
-    r"\.py\s+--\S")
+    r"^\s*python3\s+\.claude/hooks/(?:bash-whitelist|bash-advise|py-inline-guard"
+    r"|permission-audit)\.py\s+--\S")
 
 
 def split_segments(text):

@@ -15,6 +15,9 @@ allow     npx tsc --noEmit && npm run lint && npm run build
 
 ask       gh pr list
           not on the project bash whitelist: gh — no rule allows it at all
+          bash-advise: no allowed rewrite is known for `gh`. Do not hunt for a
+          spelling that passes — say in one line what this call is for so the
+          approval is informed, and file the rule if the shape will recur.
 ```
 
 No dependencies, one Python file, rules in JSON.
@@ -32,7 +35,9 @@ the command. 828 prompts in five days; 48 were inline heredocs, 35 were shell
 loops, 181 were `cd <the directory we are already in> && …`. None were
 dangerous. All of them interrupted a person, and a person who approves fifty
 harmless prompts stops reading the fifty-first. So a shape that has an allowed
-equivalent is denied **with that equivalent**, and the agent recomposes.
+equivalent is denied **with that equivalent**, and the agent recomposes. What is
+left — the shapes that genuinely have to reach a human — is what the third hook
+is for; see [The third hook](#the-third-hook-explaining-the-ask).
 
 **Searching for a dangerous word is not running it.** `grep -n "rm|sudo" file`
 was refused as privilege escalation. The gate now blanks the quoted arguments of
@@ -69,9 +74,11 @@ deny list; and runs the fixtures. It overwrites nothing without `--force`.
 .claude/
   hooks/bash-whitelist.py          the engine — no rules inside it
   hooks/py-inline-guard.py         reads the Python that `python3 -c` runs
+  hooks/bash-advise.py             turns an `ask` into advice the AGENT can act on
   hooks/permission-audit.py        logs what still needed a human; --report reads it back
   scripts/whitelist-request.py     how an agent asks for a rule instead of a keypress
   whitelist/rules.json             THIS project's policy — the file you edit
+  whitelist/advice.json            what to tell the agent when the answer is `ask`
   whitelist/profiles/*.json        base · git · git-branch-policy · node · python
   skills/bash-discipline/SKILL.md  how an agent composes a command that passes
 ```
@@ -117,6 +124,52 @@ judge — the one shape it cannot cover is the one shape that must stay refused.
 
 What it does not do: it constrains writing and executing, not reading.
 `print(open("x").read())` is allowed for any readable file except `.env`.
+
+## The third hook: explaining the `ask`
+
+The first section of this README says a refusal must reach the party who can act
+on it, and then names `ask` as the verdict that does not. That was left as a
+known hole for a while, on the theory that `ask` is rare. It is not: in the repo
+this was last curated in, `--report` counted 211 Bash prompts, 34 of them `git`
+and 26 of them `gh`, the same shapes over and over. The human approved each one
+and the agent learned nothing from any of them, because
+`permissionDecisionReason` is the text on the approval dialog and there is no
+spelling of it that reaches the model.
+
+`bash-advise.py` is a second `PreToolUse(Bash)` hook that returns
+`additionalContext` instead — the harness's channel for non-error feedback to
+the model. It re-runs *this* gate's `verdict()` (imported, so the two cannot
+disagree) and speaks only when the answer is `ask`:
+
+```
+ask       git checkout release-2
+          not on the project bash whitelist: git — the rules that mention it: …
+          bash-advise: rewrite as `git switch BRANCH`
+          (plain `git checkout X` is off the list because `git checkout src/File.ts`
+           has the same spelling and throws that file's edits away)
+
+ask       MB=$(git merge-base HEAD main) && echo $MB
+          bash-advise: the blocker is command substitution $( ), not any one
+          program — run the inner command as its own call and use the value in
+          the next one.
+```
+
+It returns **no** `permissionDecision`, ever. It cannot allow, deny or rewrite a
+call; the gate still decides and the human still approves. Two consequences worth
+keeping:
+
+- **The advice table is data, and it is not write-protected.** `advice.json` lives
+  beside `rules.json` and holds `{match, instead, why}`. It changes no verdict, so
+  an agent that edits it has misled itself and nothing else — which is why it is
+  the one file here an agent may curate. `rules.json` is still off limits.
+- **An entry that invents a spelling is worse than no entry.** `instead` must name
+  a form genuinely on this project's whitelist, or say plainly that none exists.
+  The third kind of advice — "no allowed rewrite is known for `gh`" — is the one
+  that stops an agent trying six variants of a command that will never pass, and
+  it is the reason the table does not need to be complete to be useful.
+
+Curate it from the same evidence as the rules: every shape on
+`--report` either earns a rule or earns an entry here.
 
 ## Writing the rules
 
@@ -164,6 +217,8 @@ python3 .claude/hooks/bash-whitelist.py --explain '<cmd>'    # verdict and reaso
 python3 .claude/hooks/bash-whitelist.py --show-rules         # the merged chain, ids and all
 python3 .claude/hooks/py-inline-guard.py --self-test         # the inline-body fixtures
 python3 .claude/hooks/py-inline-guard.py --explain '<cmd>'   # what the guard thinks of one body
+python3 .claude/hooks/bash-advise.py --self-test             # the advice routing fixtures
+python3 .claude/hooks/bash-advise.py --explain '<cmd>'       # the advice an ask would carry
 python3 .claude/hooks/permission-audit.py --report           # what keeps costing a prompt
 python3 .claude/scripts/whitelist-request.py --self-test     # the "could this authorise rm" probes
 ```
@@ -178,10 +233,13 @@ written yet. Widen deliberately, never to silence a prompt.
 
 ## The part that is not code
 
-The installer adds `Edit`/`Write` deny rules for the hook, the profiles,
+The installer adds `Edit`/`Write` deny rules for the three hooks, the profiles,
 `rules.json` and `settings.json` itself. Keep them. An agent that can delete six
 lines from the file registering the hooks has no leash at all; and `settings.json`
 is on the list because it is the file that registers the hooks.
+
+`advice.json` is deliberately **not** on that list. Check that distinction if you
+change the deny rules: what decides is protected, what explains is not.
 
 Changes to the gate are prepared as a patch, verified with
 `--rules <copy> --self-test`, and applied by a human.

@@ -8,8 +8,11 @@ and most of that is step 4, which is the only part that makes the gate fit
 **What you are installing.** A `PreToolUse(Bash)` hook that decides every shell
 command before it runs: `deny` (refused, reason returned to the agent),
 `allow` (runs silently), or `ask` (falls through to the human's permission
-prompt). Plus a `PermissionRequest` hook that logs what fell through, so the
-rules can be curated from evidence rather than guesswork.
+prompt). A second `PreToolUse(Bash)` hook that reads the body of an inline
+`python3 -c`. A third that, on `ask`, tells the agent how to rewrite the command
+or that nothing allowed will do — it decides nothing, it only explains. Plus a
+`PermissionRequest` hook that logs what fell through, so the rules can be curated
+from evidence rather than guesswork.
 
 **What you must not do.** Do not widen a rule to make your current command run.
 Do not add a rule that could authorise a delete. Do not edit the gate after
@@ -45,23 +48,31 @@ It copies:
 |---|---|
 | `.claude/hooks/bash-whitelist.py` | the engine — no rules inside it |
 | `.claude/hooks/py-inline-guard.py` | reads the Python that `python3 -c` runs |
+| `.claude/hooks/bash-advise.py` | on `ask`, tells the agent the allowed rewrite |
 | `.claude/hooks/permission-audit.py` | the prompt log and its `--report` reader |
 | `.claude/scripts/whitelist-request.py` | how a rule gets asked for |
 | `.claude/whitelist/profiles/*.json` | the shipped rule profiles |
 | `.claude/whitelist/rules.json` | this project's policy — the file you edit |
+| `.claude/whitelist/advice.json` | what the advisor says — the file you also edit |
 | `.claude/skills/bash-discipline/SKILL.md` | how an agent composes a command |
 
-…wires all three hooks into `.claude/settings.json` (two `PreToolUse(Bash)`, one
+…wires all four hooks into `.claude/settings.json` (three `PreToolUse(Bash)`, one
 `PermissionRequest`), adds the write-protection deny list, appends two lines to
-`.gitignore`, and runs both sets of fixtures. It
+`.gitignore`, and runs all three sets of fixtures. It
 never overwrites an existing file unless you pass `--force`; anything it kept is
 printed by name.
+
+`advice.json` is the one file here that is **not** write-protected: it produces a
+sentence, never a verdict, so an agent editing it can mislead only itself. Do not
+"fix" that by adding it to the deny list — and do not treat it as a way to argue
+with a rule either.
 
 ## 3. Confirm it decides
 
 ```sh
 python3 .claude/hooks/bash-whitelist.py --self-test
 python3 .claude/hooks/py-inline-guard.py --self-test
+python3 .claude/hooks/bash-advise.py --self-test
 python3 .claude/hooks/bash-whitelist.py --explain 'git push --force origin main'
 python3 .claude/hooks/bash-whitelist.py --explain 'npm run build'
 ```
@@ -104,6 +115,24 @@ can trust the rule. Re-run `--self-test` after each edit.
 (`--show-rules` lists them) rather than forking the profile. Say in your report
 which ones you dropped and why.
 
+## 4b. Fit the advice to this project
+
+`.claude/whitelist/advice.json` arrived as an example too. It is what the agent is
+told when the gate answers `ask`, so its entries have to name forms that are on
+*this* project's whitelist. Two edits are almost always needed:
+
+- **Delete or correct any entry whose `instead` is not true here.** An entry that
+  names a form this project does not allow sends an agent hunting, which is the
+  failure the file exists to prevent. Check each one with
+  `python3 .claude/hooks/bash-whitelist.py --explain '<the suggested form>'`.
+- **Add the shapes this project's agents actually reach for** and that are
+  deliberately left as `ask` — a deploy, a migration, a release script. For those
+  the `instead` is not a rewrite; it is what the human needs to hear before
+  approving.
+
+Leave the "no allowed rewrite is known" fallback alone: it is generated, not
+configured, and it is the entry that matters most for a shape nobody anticipated.
+
 ## 5. Tell the project's agents the gate exists
 
 Add this to the project's `CLAUDE.md` (adjust the paths if the project keeps
@@ -116,7 +145,9 @@ them elsewhere):
 rules in `.claude/whitelist/rules.json`: destructive and history-rewriting
 commands are denied, the ordinary flow is allowed silently, and everything else
 asks the human. A refusal comes back with the allowed equivalent — act on it,
-do not retry a variant.
+do not retry a variant. When a call does reach the human, `bash-advise.py`
+attaches either the allowed rewrite or a plain statement that none exists; treat
+that statement as final and say what the call is for instead of trying variants.
 
 **Aim before you type — read the `bash-discipline` skill before writing a Bash
 call.** The whitelist is not a filter you discover by hitting it. Check a shape
