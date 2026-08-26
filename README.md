@@ -269,3 +269,9 @@ somewhere central is a reasonable future; serving the *decision* is not.
 ## Requirements
 
 Python 3.8+. No third-party packages. macOS and Linux.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
+
+Copyright 2026 Mykola Koshurenko.
