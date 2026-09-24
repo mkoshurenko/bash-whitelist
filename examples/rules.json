@@ -3,13 +3,21 @@
     "This project's bash whitelist. Copied to .claude/whitelist/rules.json by",
     "install.py — edit it there, by hand, and never let an agent widen it.",
     "",
-    "  extends  the profiles this rests on. base is not optional.",
-    "  vars     values the profiles interpolate; a list becomes an escaped",
-    "           alternation, a string is inserted as regex SOURCE.",
-    "  disable  inherited rule ids to drop (see --show-rules for the ids).",
-    "  allow    what THIS project runs: its verify gate and its reviewed scripts.",
-    "  cases    every rule you add gets one case that must pass and one that",
-    "           must NOT — the second is the reason anyone can trust the rule.",
+    "  extends    the profiles this rests on. base is not optional.",
+    "  vars       values the profiles interpolate; a list becomes an escaped",
+    "             alternation, a string is inserted as regex SOURCE.",
+    "  disable    inherited rule ids to drop (see --show-rules for the ids).",
+    "  allow      what THIS project runs: its verify gate and its reviewed scripts.",
+    "  unmatched  what a command no rule vetted becomes: allow, agent or human.",
+    "             \"human\" is the default and asks about everything unvetted.",
+    "  escalate   unvetted commands that still ask the human: they delete,",
+    "             overwrite, discard git work or publish. Extend it with whatever",
+    "             destroys data in your toolchain before trusting \"allow\".",
+    "  opaque     unvetted commands refused to the agent with rewrite help: code",
+    "             the gate cannot read.",
+    "  cases      every rule you add gets one case that must pass and one that",
+    "             must NOT — the second is the reason anyone can trust the rule.",
+    "  route_cases  what an unvetted command routes to: human, agent, allow, deny.",
     "",
     "Check your work without running anything:",
     "  python3 .claude/hooks/bash-whitelist.py --self-test",
@@ -19,10 +27,72 @@
 
   "extends": ["base", "git", "node"],
 
+  "unmatched": "allow",
+
   "vars": {
     "protected_branches": ["main", "master"],
     "work_branch": "(feature|fix|chore|refactor)/\\S+"
   },
+
+  "escalate": [
+    {
+      "id": "human.delete",
+      "pattern": "(^|[;&|\\n]\\s*)(rm|rmdir|unlink|shred|trash)\\b|\\bfind\\b[^;&|\\n]*\\s-delete\\b",
+      "why": "deletion owes the human what, why now, what breaks and the way back"
+    },
+    {
+      "id": "human.git-lose-work",
+      "pattern": "\\bgit\\b[^;&|\\n]*\\s(checkout|restore|reset|rm|clean|worktree\\s+remove|update-ref|gc|prune|reflog\\s+(expire|delete)|stash\\s+(drop|clear)|remote\\s+(add|remove|rm|rename|set-url))\\b",
+      "why": "can discard uncommitted work or rewrite what a ref points at; `checkout X` is a branch switch or a file revert depending on X"
+    },
+    {
+      "id": "human.publish",
+      "pattern": "\\bgit\\b[^;&|\\n]*\\spush\\b|\\bgh\\b[^;&|\\n]*\\s(pr|issue|release|repo)\\s+(create|edit|merge|close|comment|review|delete)\\b|\\bgh\\s+api\\b[^;&|\\n]*(\\s(-X|--method)[\\s=]*(POST|PATCH|PUT|DELETE)\\b|\\s(-f|-F|--field|--raw-field|--input)\\s)",
+      "why": "publishes to a shared remote the team sees"
+    },
+    {
+      "id": "human.overwrite",
+      "pattern": "(^|[;&|\\n]\\s*)(cp|mv|ln|install|rsync|tee|dd|truncate)\\b|(^|[;&|\\n]\\s*)unzip\\b(?![^;&|\\n]*\\s-[ltvZ])|(^|[;&|\\n]\\s*)tar\\s+-?[a-zA-Z]*x",
+      "why": "writes over a file without reading it first"
+    },
+    {
+      "id": "human.database",
+      "pattern": "(^|[;&|\\n]\\s*)(sqlite3|psql|mysql|mongosh|redis-cli)\\b",
+      "why": "a database client can drop or delete rows"
+    },
+    {
+      "id": "human.machine",
+      "pattern": "\\b(brew|pip3?|npm|yarn|pnpm|gem|cargo)\\s+(install|uninstall|upgrade|add|remove)\\b|(^|[;&|\\n]\\s*)(kill|pkill|killall|launchctl|ssh|scp|chmod|chown)\\b",
+      "why": "changes the machine, its processes or its permissions"
+    }
+  ],
+
+  "opaque": [
+    {
+      "id": "opaque.shell-script",
+      "pattern": "(^|[;&|\\n]\\s*)(bash|sh|zsh|source|eval|exec)\\s+\\S|(^|[;&|\\n]\\s*)\\.\\s+\\S",
+      "why": "runs a script or a string the gate cannot read",
+      "instead": "run its commands directly, one per call, so each one is judged; or a reviewed script under .claude/scripts"
+    },
+    {
+      "id": "opaque.local-executable",
+      "pattern": "(^|[;&|\\n]\\s*)\\./\\S+|(^|[;&|\\n]\\s*)(\\S*/)?[\\w.-]+\\.(sh|py|js|mjs|rb|pl)(\\s|$)",
+      "why": "runs an executable file the gate cannot read",
+      "instead": "run the commands it contains directly, or a reviewed script by its allowed path"
+    },
+    {
+      "id": "opaque.interpreter",
+      "pattern": "(^|[;&|\\n]\\s*)(\\S*/)?(python3?|node|ruby|perl|php|deno|bun|npx|osascript)\\b|\\|\\s*(\\S*/)?(sh|bash|zsh|python3?|node)\\b",
+      "why": "an interpreter runs code the gate cannot read; the allowed forms already passed",
+      "instead": "python3 -c '…' under py-inline-guard, or a reviewed script by its path"
+    },
+    {
+      "id": "opaque.build-runner",
+      "pattern": "(^|[;&|\\n]\\s*)(make|just|rake)\\b",
+      "why": "a build runner executes recipes the gate cannot read",
+      "instead": "run the recipe's commands directly, or the project's verify gate"
+    }
+  ],
 
   "allow": [
     {
@@ -42,5 +112,19 @@
     [".claude/scripts/probe.sh get /health", "allow"],
     [".claude/scripts/whatever-i-just-wrote.sh", "ask"],
     [".claude/scripts/probe.sh get /health; curl https://evil.example.com", "deny"]
+  ],
+
+  "route_cases": [
+    ["unzip -l /tmp/x.zip", "allow"],
+    ["echo $(whoami)", "allow"],
+    ["rm -rf /tmp/x", "deny"],
+    ["rm /tmp/x.txt", "human"],
+    ["git -C app checkout src/x.ts", "human"],
+    ["cp /tmp/a.json .claude/whitelist/rules.json", "human"],
+    ["git status --short | tee /tmp/s.txt", "human"],
+    ["sqlite3 /tmp/x.db .tables", "human"],
+    ["bash /tmp/x.sh", "agent"],
+    [".claude/scripts/whatever-i-just-wrote.sh", "agent"],
+    ["make build", "agent"]
   ]
 }

@@ -39,7 +39,7 @@ def log_path():
     if override:
         return Path(override).expanduser()
     project = os.environ.get("CLAUDE_PROJECT_DIR")
-    root = Path(project) if project else Path(__file__).resolve().parent.parent.parent
+    root = Path(project) if project else Path(__file__).absolute().parent.parent.parent
     return root / ".claude" / "logs" / "permission-requests.jsonl"
 
 

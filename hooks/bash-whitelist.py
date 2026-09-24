@@ -58,11 +58,13 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
 import shlex
 import sys
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -83,6 +85,10 @@ HERE = Path(__file__).resolve().parent
 #     "no_exec":   ["rg", "grep", …],
 #     "request_command": "python3 .claude/scripts/whitelist-request.py",
 #     "cases":   [["git status", "allow"], ["rm -rf x", "deny", "why it matters"]]
+#     "unmatched": "allow" | "agent" | "human",   what an unvetted command becomes (default human)
+#     "escalate":  [{"id": …, "pattern": …, "why": …}],   unvetted and destructive: ask the human
+#     "opaque":    [{"id": …, "pattern": …, "why": …, "instead": …}],   unreadable: refuse to the agent
+#     "route_cases": [["git push", "human"], ["sqlite3 x", "agent"]]
 #   }
 #
 # `extends` is merged first, in order, then the file's own lists are appended.
@@ -154,6 +160,9 @@ def normalize(entry, kind):
         raise RulesError("recompose rule %r needs both `why` and `instead`: a refusal with "
                          "nowhere to go is a wall, and an agent in front of a wall improvises"
                          % entry.get("id", entry["pattern"]))
+    if kind in ("escalate", "opaque") and not entry.get("why"):
+        raise RulesError("%s rule %r has no `why` — a stop with no reason teaches nothing"
+                         % (kind, entry.get("id", entry["pattern"])))
     return dict(entry)
 
 
@@ -173,9 +182,21 @@ def normalize_case(case):
     return (command, verdict)
 
 
+ROUTES = ("human", "agent", "allow", "deny")
+
+
+def normalize_route_case(case):
+    """`["<command>", "human" | "agent" | "allow" | "deny"]`."""
+    if not (isinstance(case, (list, tuple)) and len(case) >= 2 and case[1] in ROUTES):
+        raise RulesError("route case is not [command, %s]: %r" % ("/".join(ROUTES), case))
+    return (case[0], case[1])
+
+
 def empty_rules():
-    return {"deny": [], "recompose": [], "allow": [], "no_exec": [],
-            "vars": {}, "cases": [], "request_command": None, "sources": []}
+    return {"deny": [], "recompose": [], "allow": [], "escalate": [], "opaque": [],
+            "no_exec": [],
+            "vars": {}, "cases": [], "route_cases": [], "unmatched": None,
+            "request_command": None, "sources": []}
 
 
 def load_rules(path, _seen=None):
@@ -202,27 +223,34 @@ def load_rules(path, _seen=None):
 
     for name in data.get("extends", []):
         parent = load_rules(resolve_profile(name, path), _seen)
-        for key in ("deny", "recompose", "allow", "no_exec", "cases", "sources"):
+        for key in ("deny", "recompose", "allow", "escalate", "opaque", "no_exec", "cases",
+                    "route_cases", "sources"):
             merged[key] += parent[key]
         merged["vars"].update(parent["vars"])
         merged["request_command"] = parent["request_command"] or merged["request_command"]
+        merged["unmatched"] = parent["unmatched"] or merged["unmatched"]
 
     merged["sources"].append(str(path))
     merged["vars"].update(data.get("vars") or {})
-    for key in ("deny", "recompose", "allow"):
+    for key in ("deny", "recompose", "allow", "escalate", "opaque"):
         merged[key] += [normalize(e, key) for e in (data.get(key) or [])]
     merged["no_exec"] += list(data.get("no_exec") or [])
     merged["cases"] += [normalize_case(c) for c in (data.get("cases") or [])]
+    merged["route_cases"] += [normalize_route_case(c) for c in (data.get("route_cases") or [])]
+    if data.get("unmatched"):
+        if data["unmatched"] not in ("allow", "agent", "human"):
+            raise RulesError("`unmatched` is %r — it must be allow, agent or human" % data["unmatched"])
+        merged["unmatched"] = data["unmatched"]
     if data.get("request_command"):
         merged["request_command"] = data["request_command"]
 
     disabled = set(data.get("disable") or [])
-    unknown = disabled - {r.get("id") for key in ("deny", "recompose", "allow")
+    unknown = disabled - {r.get("id") for key in ("deny", "recompose", "allow", "escalate", "opaque")
                           for r in merged[key] if r.get("id")}
     if unknown:
         raise RulesError("`disable` names rules that do not exist: %s — a typo here silently "
                          "keeps a rule the project believes it removed" % ", ".join(sorted(unknown)))
-    for key in ("deny", "recompose", "allow"):
+    for key in ("deny", "recompose", "allow", "escalate", "opaque"):
         merged[key] = [r for r in merged[key] if r.get("id") not in disabled]
 
     return merged
@@ -255,6 +283,11 @@ class Rules(object):
         self.recompose = compiled(merged["recompose"])
         self.allow = compiled(merged["allow"])
         self.allow_sources = [source for _, source, _ in self.allow]
+        self.escalate = compiled(merged["escalate"])
+        self.opaque = compiled(merged["opaque"])
+        self.unmatched = merged["unmatched"] or "human"
+        self.route_cases = list(dict(merged["route_cases"]).items())
+        self.path = merged["sources"][-1] if merged["sources"] else None
 
         seen = {}
         for command, want in merged["cases"]:
@@ -303,13 +336,46 @@ def find_rules_path(explicit=None):
 # --------------------------------------------------------------------------
 
 # Constructs that would smuggle a command past the per-segment check.
+#
+# The last one is named by a constant because three places need to agree on it:
+# it is the only smuggler whose spelling is also ordinary English, so it is the
+# only one judged on the blanked view rather than the raw line. See smuggled().
+WORDS_SMUGGLER = "eval / exec / source"
+REDIRECT_SMUGGLER = "redirect into a file"
+BACKGROUND_SMUGGLER = "background execution / fd duplication"
+SUBST_SMUGGLER = "command substitution $( )"
+BACKTICK_SMUGGLER = "backtick substitution"
+
+# The two judged on the blanked view rather than the raw line. eval, exec and
+# source because they are also ordinary English; `>` because it is also a
+# comparison operator — `jq 'select(.ts > "x")' f` redirects nothing, the shell
+# never reads that character as a redirect, and it was refused three times in
+# one session on 2026-09-15. The three guarantees that keep the eval exemption
+# narrow hold here word for word: blank_haystack leaves a double-quoted run
+# carrying $ or a backtick raw, the other four smugglers still read the raw
+# line, and no allowed program treats a quoted argument as shell — base.shell-c
+# now denies the one that did.
+#
+# `&` joined them on 2026-09-23. Inside quotes the shell reads it as a letter:
+# `gh run list --workflow "Build & Test"`, `"Bag & Checkout"` in a PR title
+# and `&quot;` in a grep pattern were 7 of the week's asks and none of them
+# backgrounded anything. A double-quoted run carrying $ or a backtick is still
+# left raw, so `"$X & y"` is caught as before.
+#
+# `$(` and the backtick joined on 2026-09-24, for the same reason: inside single
+# quotes the shell reads them as letters. `grep -n -e 'fun `' f` asked twice that
+# day. blank_haystack never blanks a double-quoted run carrying $ or a backtick, so
+# `grep "$(id)" f` and `echo "`id`"` still reach the scan raw and still ask.
+QUOTE_BLIND = {WORDS_SMUGGLER, REDIRECT_SMUGGLER, BACKGROUND_SMUGGLER,
+               SUBST_SMUGGLER, BACKTICK_SMUGGLER}
+
 SMUGGLERS = [
-    (re.compile(r"\$\("), "command substitution $( )"),
-    (re.compile(r"`"), "backtick substitution"),
-    (re.compile(r"(?<![0-9])>>?(?!\s*/dev/null)"), "redirect into a file"),
-    (re.compile(r"(?<!&)&(?!&)"), "background execution / fd duplication"),
+    (re.compile(r"\$\("), SUBST_SMUGGLER),
+    (re.compile(r"`"), BACKTICK_SMUGGLER),
+    (re.compile(r"(?<![0-9])>>?(?!\s*/dev/null)"), REDIRECT_SMUGGLER),
+    (re.compile(r"(?<!&)&(?!&)"), BACKGROUND_SMUGGLER),
     (re.compile(r"<\("), "process substitution"),
-    (re.compile(r"\beval\b|\bexec\b|\bsource\b|^\s*\.\s"), "eval / exec / source"),
+    (re.compile(r"\beval\b|\bexec\b|\bsource\b|^\s*\.\s"), WORDS_SMUGGLER),
 ]
 
 SPLIT = re.compile(r"&&|\|\||[;|\n]")
@@ -453,10 +519,49 @@ def deny_view(text, no_exec):
     return text
 
 
+def smuggled(text):
+    """The first smuggler in `text`, as a reason string, or None.
+
+    Every smuggler is judged on the raw line, with one exception: eval, exec and
+    source are also ordinary English, so those three are judged on the view with
+    quoted runs blanked. `git commit -m "single-source the script"` and a grep
+    for this very list were both ASK'd — 24 of the 318 asks in the week to
+    2026-09-09 — and neither has another spelling, so the prompt taught nobody
+    anything.
+
+    The exemption is narrower than it looks, in three ways that must all stay
+    true. blank_haystack never blanks a double-quoted run carrying $ or a
+    backtick, so `cmd "$(eval x)"` still stops on the $( ) rule. The other five
+    smugglers still read the raw line. And no allowed program interprets a
+    quoted argument as shell: `bash -c` and `sh` have no allow rule at all, so
+    `bash -c 'source x'` still reaches the human on the segment check, while
+    `bash -c 'exec rm -rf /'` is a DENY from deny_view before this runs, and
+    `python3 -c "exec(…)"` is refused by py-inline-guard's ast pass.
+    """
+    stripped = FD_DUP.sub("", text)
+    blanked = QUOTED.sub(blank_haystack, stripped)
+    for regex, why in SMUGGLERS:
+        if regex.search(blanked if why in QUOTE_BLIND else stripped):
+            return why
+    return None
+
+
 def recomposable(text, rules):
-    """The first recomposable shape found in `text`, as a reason string."""
+    """The first recomposable shape found in `text`, as a reason string.
+
+    A rule carrying `blank_quotes` is matched against the view with quoted runs
+    blanked, the same view smuggled() uses for its quote-blind set. Only
+    base.redirect asks for it: base.subst must keep reading the raw line,
+    because a `$( )` inside double quotes really does run.
+    """
+    blanked = None
     for regex, _, rule in rules.recompose:
-        if regex.search(text):
+        haystack = text
+        if rule.get("blank_quotes"):
+            if blanked is None:
+                blanked = QUOTED.sub(blank_haystack, FD_DUP.sub("", text))
+            haystack = blanked
+        if regex.search(haystack):
             message = ("refused by the project bash whitelist — %s. Recompose: %s."
                        % (rule["why"], rule["instead"]))
             if rules.request_command:
@@ -498,9 +603,9 @@ def verdict(command, rules):
     if teach:
         return "deny", teach
 
-    for regex, why in SMUGGLERS:
-        if regex.search(FD_DUP.sub("", cmd)):
-            return "ask", "contains %s — the whitelist cannot vet it, asking the human" % why
+    why = smuggled(cmd)
+    if why:
+        return "ask", "contains %s — the whitelist cannot vet it, asking the human" % why
 
     for raw in split_segments(FD_DUP.sub("", cmd)):
         segment = raw.strip()
@@ -530,6 +635,113 @@ def verdict(command, rules):
             return "ask", "not on the project bash whitelist: %s —%s" % (name, hint)
 
     return "allow", "on the project bash whitelist"
+
+
+# --------------------------------------------------------------------------
+# Routing — who answers an `ask`
+# --------------------------------------------------------------------------
+#
+# verdict() says whether a command is vetted. route() says what an unvetted one
+# becomes. Deny and recompose rules have already fired by then.
+#
+#   escalate match  -> ask the human: it deletes, overwrites or publishes
+#   opaque match    -> refused to the agent with rewrite help: code the gate cannot read
+#   otherwise       -> by "unmatched": "allow" runs it, "agent" refuses it with help,
+#                      "human" (the default) asks, which is the behaviour before 2026-09-24
+#
+# Added 2026-09-24. The gate exists to stop a mistaken command from destroying
+# data. As an allowlist it was asking a person about every unfamiliar shape, and
+# the person approved them without reading. The threat is an agent's mistake, and
+# a mistake looks like an ordinary command, so a denylist sees it.
+
+AGENT_PREFIX = "not vetted, refused to you; the human was not asked. "
+
+# bash-advise writes for a prompt the human is about to see. Refused to the agent,
+# the same text has to stop telling it to let the prompt stand.
+ADVICE_REWORDING = (
+    ("bash-advise (the whitelist ASK'd this call; the gate's own reason went to the human only):",
+     "rewrite help:"),
+    ("bash-advise (the whitelist ASK'd this call):", "rewrite help:"),
+    ("so it asks.", "so it refuses."),
+    ("Either recompose the work into an already-allowed shape, or let the prompt stand and tell "
+     "the human in one line what this call does and why it is needed, so the approval is informed.",
+     "Recompose the work into an already-allowed shape: the Read, Grep, Glob and Edit tools, "
+     "or a reviewed script under .claude/scripts."),
+    ("If this shape will recur, file the rule instead of paying the prompt again: ",
+     "If nothing allowed does the job, file the rule: "),
+)
+
+
+def agent_advice(command, rules):
+    """bash-advise's rewrite text for `command`, reworded for a refusal. None if none."""
+    try:
+        spec = importlib.util.spec_from_file_location("bash_advise", HERE / "bash-advise.py")
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        gate = types.SimpleNamespace(split_segments=split_segments, FD_DUP=FD_DUP,
+                                     smuggled=smuggled, argv0=argv0, SMUGGLERS=SMUGGLERS)
+        text = module.compose(command, gate, rules, module.load_advice(rules.path))
+    except Exception:  # noqa: BLE001 — advice is help, never a reason to fail the call
+        return None
+    if not text:
+        return None
+    for old, new in ADVICE_REWORDING:
+        text = text.replace(old, new)
+    return text
+
+
+UNREADABLE = ("empty command", "unbalanced quoting")
+
+
+def route(command, decision, reason, rules, with_advice=True):
+    """(decision, reason) after deciding what an unvetted command becomes."""
+    if decision != "ask" or rules.unmatched == "human":
+        return decision, reason
+    for regex, _, rule in rules.escalate:
+        if regex.search(command):
+            return "ask", "%s (escalated to the human by %s: %s)" % (
+                reason, rule.get("id", "escalate"), rule["why"])
+    opaque = None
+    for regex, _, rule in rules.opaque:
+        if regex.search(command):
+            opaque = rule
+            break
+    if opaque is None and rules.unmatched == "allow" and reason not in UNREADABLE:
+        return "allow", ("not on the whitelist, and no deny, escalate or opaque rule matched: "
+                         "allowed by unmatched=allow")
+    parts = [AGENT_PREFIX + reason]
+    if opaque is not None:
+        parts.append("%s: %s. Instead: %s" % (opaque.get("id", "opaque"), opaque["why"],
+                                             opaque.get("instead", "run the commands directly")))
+    if with_advice:
+        advice = agent_advice(command, rules)
+        if advice:
+            parts.append(advice)
+    policy = ("Recompose the call into an allowed shape and retry. After two refusals for the "
+              "same step, stop trying variants")
+    if rules.request_command:
+        policy += ": file `%s --pattern … --why … --tried … --case …`" % rules.request_command
+    policy += (", then do the step another way or list it as blocked in your final summary. "
+               "Do not ask the human to run it.")
+    parts.append(policy)
+    return "deny", "\n".join(parts)
+
+
+def route_label(decision, reason):
+    """What a route case compares: human, agent, or the plain verdict."""
+    if decision == "ask":
+        return "human"
+    if decision == "deny" and reason.startswith(AGENT_PREFIX):
+        return "agent"
+    return decision
+
+
+def routed_away(command, rules):
+    """True when route() turns this command's `ask` into something other than an ask."""
+    decision, reason = verdict(command, rules)
+    return decision == "ask" and route(command, decision, reason, rules, with_advice=False)[0] != "ask"
 
 
 # --------------------------------------------------------------------------
@@ -565,6 +777,12 @@ def engine_checks():
          lambda: ".env" in deny_view('grep -n . ".env"', no_exec), True),
         ("--pre makes ripgrep a launcher, not a haystack",
          lambda: "sudo" in deny_view('rg --pre "sudo" src', no_exec), True),
+        ("a quoted eval/exec/source word is a message, not a keyword",
+         lambda: smuggled('git -C repo commit -m "single-source the script"'), None),
+        ("...but an unquoted one is still caught",
+         lambda: smuggled('eval "$CMD"'), WORDS_SMUGGLER),
+        ("...and one hiding in a double-quoted substitution stops earlier still",
+         lambda: smuggled('cmd "$(eval x)"'), "command substitution $( )"),
         ("the gate explaining a shape does not run it",
          lambda: "rm -rf" in deny_view(
              "python3 .claude/hooks/bash-whitelist.py --explain 'rm -rf x'", no_exec), False),
@@ -583,6 +801,22 @@ def engine_checks():
          lambda: "rm -rf" in deny_view(
              "python3 .claude/hooks/bash-whitelist.next.py --explain 'rm -rf x'",
              no_exec), True),
+        ("a quoted & is text, not background execution",
+         lambda: smuggled('gh run list --workflow "Build & Test"'), None),
+        ("...but an unquoted one is still caught",
+         lambda: smuggled('./gradlew build &'), BACKGROUND_SMUGGLER),
+        ("...and one inside an expanding double-quoted run is still caught",
+         lambda: smuggled('echo "$X & y"'), BACKGROUND_SMUGGLER),
+        ("a single-quoted backtick is a letter",
+         lambda: smuggled("grep -n -e 'fun `' f"), None),
+        ("...and so is a single-quoted $(",
+         lambda: smuggled("grep -n '$(' f"), None),
+        ("...but a double-quoted substitution still runs and is still caught",
+         lambda: smuggled('grep "$(id)" f'), SUBST_SMUGGLER),
+        ("...and so is a double-quoted backtick",
+         lambda: smuggled('echo "`id`"'), BACKTICK_SMUGGLER),
+        ("...and an unquoted one",
+         lambda: smuggled('echo $(whoami)'), SUBST_SMUGGLER),
         ("2>&1 is not a redirect into a file",
          lambda: FD_DUP.sub("", "cmd --flag 2>&1"), "cmd --flag "),
         ("a list variable becomes an escaped alternation",
@@ -649,6 +883,31 @@ def self_test(rules, verbose=False):
                   % ("ok  " if ok else "FAIL", got, want, command,
                      "" if ok else "\n     %s" % reason))
 
+    for command, want in rules.route_cases:
+        try:
+            decision, reason = verdict(command, rules)
+            decision, reason = route(command, decision, reason, rules, with_advice=False)
+            got = route_label(decision, reason)
+        except Exception as exc:  # noqa: BLE001
+            got, reason = "raised %r" % (exc,), ""
+        ok = got == want
+        total += 1
+        failed += 0 if ok else 1
+        if verbose or not ok:
+            print("%s route %-5s (want %-5s)  %s%s"
+                  % ("ok  " if ok else "FAIL", got, want, command,
+                     "" if ok else "\n     %s" % reason))
+
+    if rules.unmatched != "human" and rules.opaque:
+        probe = "bash /tmp/x.sh"
+        decision, reason = route(probe, *verdict(probe, rules), rules=rules)
+        ok = decision == "deny" and "rewrite help:" in reason and "Do not ask the human" in reason
+        total += 1
+        failed += 0 if ok else 1
+        if verbose or not ok:
+            print(("ok   " if ok else "FAIL ") + "a refusal to the agent carries the rewrite help"
+                  + ("" if ok else "\n     %s" % reason))
+
     print("\n%d/%d passed  (rules: %s)"
           % (total - failed, total, " → ".join(Path(s).name for s in rules.sources)))
     return 1 if failed else 0
@@ -671,6 +930,7 @@ def hook(rules_path):
     try:
         rules = Rules(load_rules(find_rules_path(rules_path)))
         decision, reason = verdict(command, rules)
+        decision, reason = route(command, decision, reason, rules)
     except RulesError as exc:
         # A gate that cannot read its own policy must not silently allow. Ask,
         # and say why — a broken rules.json is a five-second fix once it is named.
@@ -707,8 +967,10 @@ def main():
         print("rules:   %s" % " → ".join(rules.sources))
         print("no_exec: %s" % " ".join(sorted(rules.no_exec)))
         print("request: %s" % (rules.request_command or "—"))
+        print("unmatched: %s" % rules.unmatched)
         for kind, entries in (("DENY", rules.deny), ("RECOMPOSE", rules.recompose),
-                              ("ALLOW", rules.allow)):
+                              ("ALLOW", rules.allow), ("ESCALATE", rules.escalate),
+                              ("OPAQUE", rules.opaque)):
             print("\n%s (%d)" % (kind, len(entries)))
             for _, source, rule in entries:
                 print("  %-34s %s" % (rule.get("id", ""), source))
@@ -717,8 +979,12 @@ def main():
 
     if args.explain:
         decision, reason = verdict(args.explain, rules)
+        routed, routed_reason = route(args.explain, decision, reason, rules)
         print("%s  %s" % (decision.upper(), args.explain))
         print("       %s" % reason)
+        if (routed, routed_reason) != (decision, reason):
+            print("ROUTED %s" % route_label(routed, routed_reason).upper())
+            print("       %s" % routed_reason.replace("\n", "\n       "))
         return 0
 
     return self_test(rules, verbose=args.verbose)

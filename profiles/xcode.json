@@ -1,0 +1,99 @@
+{
+  "_": [
+    "xcode — the xcodebuild/xcrun/swiftlint surface of an iOS project.",
+    "",
+    "  scope   compile, test and inspect. Anything that signs, uploads or changes",
+    "          the machine's toolchain is not here: `archive`/`-exportArchive`,",
+    "          `-allowProvisioningUpdates` and `xcode-select --switch` are denied,",
+    "          not left at ask, because none of them is a step in reading or",
+    "          proving a code change.",
+    "  actions {{xcode_action}} is the verb list an agent needs to prove a change:",
+    "          build, build-for-testing, test, test-without-building, analyze,",
+    "          clean. `clean build-for-testing` is a common one-command spelling,",
+    "          so a leading `clean` is allowed in front of another verb.",
+    "  simctl  read-only subcommands only. `simctl erase` and `simctl delete`",
+    "          throw away a simulator and its state — a delete, so it is denied.",
+    "  lint    swiftlint is invoked by a vendored path in the repo, set in",
+    "          {{swiftlint_bin}}. `lint` is allowed; `--fix` rewrites source files",
+    "          outside the Edit tool and is left to ask, so the diff a human sees",
+    "          is the diff the agent made.",
+    "  scripts one reviewed CI entry point by exact name: BuildScripts/ci_xcodebuild.sh.",
+    "          Rename it in your project's rules.json if yours is spelled differently."
+  ],
+
+  "extends": ["base"],
+
+  "vars": {
+    "xcode_action": "(build|build-for-testing|test|test-without-building|analyze|clean)",
+    "swiftlint_bin": "(?:\\./)?(?:src/)?BuildScripts/lib/swiftlint/swiftlint"
+  },
+
+  "deny": [
+    {
+      "id": "xcode.archive",
+      "pattern": "\\bxcodebuild\\b[^|;&]*\\s(archive|-exportArchive)\\b.*",
+      "reason": "archiving and exporting an .ipa is a release step, not a build check"
+    },
+    {
+      "id": "xcode.provisioning",
+      "pattern": "\\bxcodebuild\\b[^|;&]*\\s-allowProvisioningUpdates\\b.*",
+      "reason": "that flag lets the build mutate signing assets on the developer account"
+    },
+    {
+      "id": "xcode.simctl-destroy",
+      "pattern": "\\bxcrun\\s+simctl\\s+(erase|delete)\\b.*",
+      "reason": "erasing or deleting a simulator throws away state a failing test run may be the only record of",
+      "note": "A deny and not a recompose, for the same reason as node.cache-clean: there is no tidier spelling of throwing something away. `simctl shutdown` and `simctl boot` are not here — they change nothing on disk, so they fall through to ask."
+    },
+    {
+      "id": "xcode.select-switch",
+      "pattern": "(sudo\\s+)?xcode-select\\s+(-s|--switch|--install|--reset)\\b.*",
+      "reason": "switching the active toolchain changes the machine, not the project"
+    }
+  ],
+
+  "allow": [
+    {"id": "xcode.build",
+     "pattern": "xcodebuild\\s+(clean\\s+)?{{xcode_action}}\\b.*",
+     "note": "the verb may be preceded by `clean`, which is how a from-scratch test build is usually spelled"},
+    {"id": "xcode.inspect",
+     "pattern": "xcodebuild\\s+(-list|-showsdks|-showdestinations|-showBuildSettings|-version)\\b.*"},
+    {"id": "xcode.xcrun-read",
+     "pattern": "xcrun\\s+(simctl\\s+(list|listapps|getenv|get_app_container)|xctrace\\s+list|--find\\s+\\S+)\\b.*"},
+    {"id": "xcode.select-read",
+     "pattern": "xcode-select\\s+(-p|--print-path)\\s*"},
+    {"id": "xcode.swiftlint",
+     "pattern": "{{swiftlint_bin}}\\s+(?!.*(--fix|--autocorrect|--in-place))(lint\\s+)?(--(strict|quiet|reporter|config|force-exclude)(\\s+\\S+)?\\s+)*\\S*.*",
+     "note": "`--fix` is excluded by lookahead, not merely absent from the flag list: the trailing path argument would otherwise swallow it. It edits source outside the Edit tool, so it asks."},
+    {"id": "xcode.swiftlint-version",
+     "pattern": "{{swiftlint_bin}}\\s+(version|--version)\\s*"},
+    {"id": "xcode.ci-script",
+     "pattern": "(?:\\./)?(?:src/)?BuildScripts/ci_xcodebuild\\.sh(\\s+.*)?"}
+  ],
+
+  "cases": [
+    ["xcodebuild test -scheme App", "allow"],
+    ["xcodebuild test -scheme App -only-testing:CoreTests", "allow"],
+    ["xcodebuild clean build-for-testing -project App.xcodeproj -scheme App -destination \"platform=iOS Simulator,OS=26.1,name=iPhone 17 Pro\"", "allow"],
+    ["xcodebuild test-without-building -scheme App -only-testing:UITests", "allow"],
+    ["xcodebuild -list", "allow"],
+    ["xcodebuild -version", "allow"],
+    ["xcrun simctl list devices", "allow"],
+    ["xcode-select -p", "allow"],
+    ["src/BuildScripts/lib/swiftlint/swiftlint lint --strict --quiet --config src/.swiftlint.yml src", "allow"],
+    ["src/BuildScripts/ci_xcodebuild.sh", "allow"],
+
+    ["src/BuildScripts/lib/swiftlint/swiftlint --fix --config src/.swiftlint.yml src", "ask"],
+    ["xcodebuild install -scheme App", "ask"],
+    ["xcrun simctl boot \"iPhone 17 Pro\"", "ask"],
+    ["xcrun simctl shutdown all", "ask"],
+
+    ["xcodebuild archive -scheme App", "deny"],
+    ["xcodebuild -exportArchive -archivePath x.xcarchive", "deny"],
+    ["xcodebuild test -scheme App -allowProvisioningUpdates", "deny"],
+    ["sudo xcode-select --switch /Applications/Xcode.app", "deny"],
+    ["xcrun simctl erase all", "deny"],
+    ["xcodebuild test -scheme App > /tmp/out.txt", "deny"],
+    ["xcodebuild test -scheme App && rm -rf build", "deny"]
+  ]
+}
