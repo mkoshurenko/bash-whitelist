@@ -36,9 +36,19 @@ decision — so the audiences stay separate and the gate stays the only thing th
 decides. Keeping it in its own file also means the advice can be edited, and the
 advice table curated, without touching the write-protected gate.
 
+WHICH ENTRY FIRED IS RECORDED, AND ONLY IN A SESSION. Curating this table used to
+be guesswork: the 2026-09-09 review found three entries naming a rule that had
+since been granted, and found them by reading all twenty. So `hook()` appends one
+`phase: "advise"` line to the same `bash-gate.jsonl` the gate's own logger writes,
+carrying the ids that matched — empty when the table had no answer, which is the
+other half of the signal. `gate_db.py --advice` turns that into "these entries
+never fire" and "these shapes still ask with nothing to say". `--explain` and
+`--self-test` write nothing: a free probe must stay free, and a fixture must not
+forge a hit.
+
 Failure is always silent. A missing rules file, a broken `advice.json`, an import
-that does not resolve: exit 0, emit nothing. An advisor that breaks a session is
-worse than one that says nothing.
+that does not resolve, an unwritable log: exit 0, emit nothing. An advisor that
+breaks a session is worse than one that says nothing.
 
 Usage:
     bash-advise.py                    # as a PreToolUse hook (JSON on stdin)
@@ -49,8 +59,10 @@ Usage:
 import argparse
 import importlib.util
 import json
+import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -60,6 +72,11 @@ GATE = HERE / "bash-whitelist.py"
 # the model's context on every ASK, so it stays a note, not a document.
 MAX_SEGMENTS = 3
 MAX_ADVICE = 2
+
+# Same cap as bash-gate-log.py. The two writers share one file, and an `advise`
+# row is joined to its `pre` row on (session, cmd) — a different truncation
+# would silently break every join.
+MAX_DETAIL = 600
 
 
 def load_gate():
@@ -90,6 +107,36 @@ def advice_path(rules_path):
         if candidate.is_file():
             return candidate
     return None
+
+
+def log_path():
+    """The gate's ledger, resolved exactly as bash-gate-log.py resolves it."""
+    override = os.environ.get("BASH_GATE_LOG")
+    if override:
+        return Path(override).expanduser()
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    root = Path(project) if project else Path.cwd()
+    return root / ".claude" / "logs" / "bash-gate.jsonl"
+
+
+def record(session, command, ids):
+    """Append one `advise` row. Never raises: auditing cannot break a session."""
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "phase": "advise",
+            "session": str(session or "unknown"),
+            "verdict": "ask",
+            "source": "bash-advise",
+            "advice": ",".join(ids),
+            "cmd": command[:MAX_DETAIL],
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load_advice(rules_path):
@@ -132,16 +179,44 @@ def smuggler(command, gate):
     is not "the program MB=$(git is not whitelisted"; it is one substitution that
     has to become its own call. Hence a sentence of its own.
     """
+    if hasattr(gate, "smuggled"):
+        # The gate owns this rule — eval/exec/source is judged on the blanked
+        # view there, and a second copy of the loop here would let the advice
+        # contradict the verdict it is explaining.
+        return gate.smuggled(command)
     for regex, why in gate.SMUGGLERS:
         if regex.search(gate.FD_DUP.sub("", command)):
             return why
     return None
 
 
-def compose(command, gate, rules, advice):
-    """The advice for one ASK'd command, or None when there is nothing to add."""
+def compose(command, gate, rules, advice, matched_out=None):
+    """The advice for one ASK'd command, or None when there is nothing to add.
+
+    `matched_out`, when given, receives the ids of the entries that produced the
+    text — in the order they were used, empty when the table had no answer. It is
+    an out-parameter rather than a second return value so that every existing
+    caller of `advise()` keeps unpacking a pair.
+    """
+    def used(entry):
+        if matched_out is not None and entry.get("id"):
+            matched_out.append(entry["id"])
+        return entry
+
     smuggled = smuggler(command, gate)
     if smuggled:
+        # A smuggler still short-circuits the segment check, but a specific advice
+        # entry beats the generic sentence: `find -exec` and `$( )` are both
+        # smugglers, and only one of them has an inner command to hoist out.
+        for regex, entry in advice:
+            if regex.search(command):
+                used(entry)
+                return ("bash-advise (the whitelist ASK'd this call):\n"
+                        "- the blocker is %s, not any one program — the gate cannot vet "
+                        "what it expands to, so it asks.\n"
+                        "- rewrite as: %s%s"
+                        % (smuggled, entry["instead"],
+                           "\n  (%s)" % entry["why"] if entry.get("why") else ""))
         return ("bash-advise (the whitelist ASK'd this call):\n"
                 "- the blocker is %s, not any one program — the gate cannot vet what it "
                 "expands to, so it asks.\n"
@@ -166,6 +241,7 @@ def compose(command, gate, rules, advice):
 
     lines = []
     for entry in matched[:MAX_ADVICE]:
+        used(entry)
         lines.append("- rewrite as: %s" % entry["instead"])
         if entry.get("why"):
             lines.append("  (%s)" % entry["why"])
@@ -185,7 +261,7 @@ def compose(command, gate, rules, advice):
             "human only):\n" + "\n".join(lines))
 
 
-def advise(command):
+def advise(command, matched_out=None):
     """(verdict, advice-or-None) for one command."""
     gate = load_gate()
     rules_path = gate.find_rules_path(None)
@@ -193,7 +269,15 @@ def advise(command):
     decision, _ = gate.verdict(command, rules)
     if decision != "ask":
         return decision, None
-    return decision, compose(command, gate, rules, load_advice(rules_path))
+    return decision, compose(command, gate, rules, load_advice(rules_path), matched_out)
+
+
+def routed_away(command):
+    """True when the gate's router turned this `ask` into an allow or a refusal to the agent."""
+    gate = load_gate()
+    if not hasattr(gate, "routed_away"):
+        return False
+    return gate.routed_away(command, gate.Rules(gate.load_rules(gate.find_rules_path(None))))
 
 
 def hook():
@@ -208,15 +292,22 @@ def hook():
     if not command.strip():
         return 0
 
+    ids = []
     try:
-        _, text = advise(command)
+        _, text = advise(command, ids)
     except Exception:  # noqa: BLE001 — a broken advisor must cost nothing but its advice
         return 0
     if not text:
         return 0
+    try:
+        if routed_away(command):
+            return 0  # allowed, or refused with this advice already in the reason
+    except Exception:  # noqa: BLE001
+        pass
 
     json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                       "additionalContext": text}}, sys.stdout)
+    record(data.get("session_id"), command, ids)
     return 0
 
 
@@ -241,21 +332,35 @@ def self_test():
     checks = [
         ("the gate's ALLOW rules loaded", bool(rules.allow_sources), True),
         ("the advice table compiled and is non-empty", bool(advice), True),
+        ("every entry carries an id to attribute a hit to",
+         all(entry.get("id") for _, entry in advice), True),
         ("an allowed command gets no advice", advise("git status")[1] is None, True),
     ]
 
     for command in ("git checkout some-branch", "gh pr list", "ps -o pid,command -p 1"):
-        decision, text = advise(command)
+        ids = []
+        decision, text = advise(command, ids)
         if decision != "ask":
             continue  # this policy already allows or denies it; not this hook's case
         checks.append(("`%s` gets advice" % command, text is not None, True))
         checks.append(("`%s` names a rewrite or says there is none" % command,
                        bool(text) and ("rewrite as:" in text or "no allowed rewrite" in text),
                        True))
+        # The ledger has to agree with the text: a named rewrite came from an
+        # entry, and "no allowed rewrite" must not be attributed to one.
+        checks.append(("`%s` attributes its advice to the right entries" % command,
+                       bool(ids) == ("- rewrite as:" in (text or "")), True))
 
     decision, text = advise("MB=$(git merge-base HEAD main) && echo done")
     checks.append(("a substitution is explained as a smuggler, not as a program",
                    decision == "ask" and bool(text) and "expands to" in text, True))
+
+    ids = []
+    decision, text = advise("find src -name '*.kt' -exec cat -n {} \\;", ids)
+    checks.append(("a smuggler with a specific advice entry gets that entry",
+                   decision != "ask" or (bool(text) and "Glob tool" in text), True))
+    checks.append(("that entry is the one recorded",
+                   decision != "ask" or ids == ["advice.find-exec"], True))
 
     for command in ("rm -rf /tmp/x", "for f in a b; do echo $f; done"):
         checks.append(("`%s` is not explained twice" % command,
@@ -281,14 +386,17 @@ def main():
     if args.self_test:
         return self_test()
     if args.explain:
+        ids = []
         try:
-            decision, text = advise(args.explain)
+            decision, text = advise(args.explain, ids)
         except Exception as exc:  # noqa: BLE001
             print("silent in a session; here it raised: %r" % (exc,), file=sys.stderr)
             return 2
         print("%s  %s" % (decision.upper(), args.explain))
         print(text if text
               else "       (no advice — the gate's own reason already reaches the agent)")
+        if ids:
+            print("       [%s]" % ", ".join(ids))
         return 0
     return hook()
 

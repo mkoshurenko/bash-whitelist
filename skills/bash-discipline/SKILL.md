@@ -24,9 +24,18 @@ fifty-first.
 2. `deny` refuses outright and is not negotiable.
 3. A **recompose** rule refuses **and names the allowed equivalent** — that
    reason comes back to you, so act on it instead of retrying a variant.
-4. Everything else asks the human. The dialog they see quotes the `allow` rules
-   that mention your program; what comes back to **you** is `bash-advise`, and it
-   says one of three things.
+4. Everything else is routed by `"unmatched"` in rules.json. Under the default,
+   `human`, it asks the human: the dialog they see quotes the `allow` rules that
+   mention your program, and what comes back to **you** is `bash-advise`, which
+   says one of three things. Under `allow` or `agent`:
+   - an `escalate` match (delete, overwrite, discard git work, publish) still
+     asks the human;
+   - an `opaque` match (`bash x.sh`, `./x`, `x.py`, an interpreter, `| sh`,
+     `make`) is refused to **you** with rewrite help: run the commands directly;
+   - anything else runs (`allow`) or is refused to you with help (`agent`).
+   When a refusal says `the human was not asked`, recompose and retry. After two
+   refusals for the same step, file a request and move on. Never hand that call
+   to the human.
 
 ## What `bash-advise` tells you, and what to do with each
 

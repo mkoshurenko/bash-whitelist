@@ -57,6 +57,7 @@ PROTECT = [
     "./.claude/whitelist/profiles/git-branch-policy.json",
     "./.claude/whitelist/profiles/node.json",
     "./.claude/whitelist/profiles/python.json",
+    "./.claude/whitelist/profiles/xcode.json",
     "./.claude/whitelist/profiles/default.json",
 ]
 

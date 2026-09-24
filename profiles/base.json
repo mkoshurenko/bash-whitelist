@@ -13,6 +13,12 @@
 
   "deny": [
     {
+      "id": "base.shell-c",
+      "pattern": "(^|[;&|]\\s*)(bash|sh|zsh)\\s+-c\\b",
+      "reason": "a shell -c argument is a second command the segment check never sees",
+      "note": "Added 2026-09-15, in the same patch that gave base.redirect blank_quotes. Blanking a quoted run before the redirect scan is only safe while no allowed program turns a quoted argument back into shell, and `bash -c \"ls > /tmp/x\"` was the one spelling that would otherwise have fallen from deny to ask. This is stricter than what it replaces: `bash -c \"ls\"` used to reach a human and now does not run at all. `bash -n <file>` is untouched — that is -n, not -c."
+    },
+    {
       "id": "base.rm-recursive",
       "pattern": "\\brm\\s+-[a-zA-Z]*[rR]",
       "reason": "recursive delete"
@@ -132,6 +138,7 @@
     {
       "id": "base.redirect",
       "pattern": "(?<![0-9])>>?(?!\\s*/dev/null)",
+      "blank_quotes": true,
       "why": "a redirect into a file both writes and hides the output from review",
       "instead": "let the output come back; write files with the Write tool and read them with Read"
     },
@@ -207,6 +214,12 @@
     ["fd -x rm {}", "deny"],
     ["fd --exec-batch rm", "deny"],
     ["fd -e ts -x sh -c 'echo {}'", "deny"],
+
+    ["jq -r 'select(.ts > \"2026-09-08\") | .tool' f.jsonl", "allow"],
+    ["ls > /tmp/x", "deny"],
+    ["bash -c \"ls > /tmp/x\"", "deny"],
+    ["sh -c 'ls'", "deny"],
+    ["bash -n script.sh", "allow"],
 
     ["rm -rf node_modules", "deny"],
     ["rm -f src/index.ts", "deny"],
@@ -296,8 +309,12 @@
     ["python3 .claude/hooks/bash-whitelist.py --explain 'git push origin x'", "allow"],
     ["python3 .claude/hooks/bash-whitelist.py --self-test", "allow"],
     ["python3 .claude/hooks/permission-audit.py --report --top 30", "allow"],
-    ["python3 .claude/hooks/bash-advise.py --explain 'git checkout main'", "allow"],
+    ["python3 .claude/hooks/bash-advise.py --explain 'git checkout release-2'", "allow"],
     ["python3 .claude/hooks/bash-advise.py --self-test", "allow"],
+    ["python3 .claude/hooks/bash-advise.py", "ask"],
+    ["./.claude/hooks/bash-advise.py --self-test", "ask"],
+    ["python3 .claude/hooks/bash-advise.py --self-test > /tmp/out.txt", "deny"],
+    ["python3 .claude/hooks/bash-advise.py --self-test; sudo id", "deny"],
     ["python3 .claude/scripts/whitelist-request.py --pattern 'gh\\s+pr\\b.*' --why 'reading PR state' --tried 'ls-remote shows refs, not bodies' --case 'gh pr list|allow'", "allow"],
     ["python3 .claude/scripts/whitelist-request.py --self-test", "allow"],
     ["python3 .claude/hooks/bash-whitelist.py --explain 'ls'; sudo id", "deny"],

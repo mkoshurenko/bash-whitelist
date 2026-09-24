@@ -18,7 +18,13 @@ leash does not have one.
         --case 'gh pr list|allow' \\
         --case 'gh pr merge 12|ask'
 
+    python3 .claude/scripts/whitelist-request.py --applied gh.read
     python3 .claude/scripts/whitelist-request.py --self-test
+
+`--applied` closes the loop the journal was missing: it rewrites the `status` of
+every `proposed` row for that id, and only after rules.json is read and found to
+define it. It still applies nothing. A row whose status nobody ever advanced is
+how the same rule gets proposed twice.
 
 Refused outright: anything that deletes. Deletion is not a shape with a better
 spelling, and autonomy over it is not something to be won one rule at a time.
@@ -184,6 +190,93 @@ def only_happy(cases):
     return not any(verdict in ("ask", "deny") for _, verdict in cases)
 
 
+def rule_ids(text):
+    """Every rule id a rules.json body defines, whatever list it sits in.
+
+    The journal records what was ASKED for; rules.json records what was GRANTED,
+    and nothing kept the two in step. On 2026-09-15 the journal carried 22 rows
+    still marked `proposed`, three of which — project.jira-cli,
+    project.jira-details, project.repo-scripts — had been live in rules.json for
+    days. A reviewer reading that journal re-proposes a rule that already exists,
+    which is how git.read-in-dir came to be filed twice.
+    """
+    data = json.loads(text)
+    ids = set()
+    for kind in ("allow", "deny", "recompose"):
+        for entry in data.get(kind) or []:
+            if isinstance(entry, dict) and entry.get("id"):
+                ids.add(entry["id"])
+    return ids
+
+
+def mark_applied(lines, rule_id, stamp):
+    """Journal lines with every `proposed` row for `rule_id` marked applied.
+
+    Returns (lines, how many changed). A row already `applied` or `superseded` is
+    left alone — this records a transition, it does not re-date one. A line that
+    is not JSON is passed through untouched: a journal with one bad line still
+    has to be readable afterwards, and repairing it is not this function's job.
+    """
+    out, changed = [], 0
+    for line in lines:
+        if not line.strip():
+            out.append(line)
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            out.append(line.rstrip("\n"))
+            continue
+        if row.get("id") == rule_id and row.get("status") == "proposed":
+            row["status"] = "applied"
+            row["applied_ts"] = stamp
+            out.append(json.dumps(row, ensure_ascii=False))
+            changed += 1
+        else:
+            out.append(line.rstrip("\n"))
+    return out, changed
+
+
+def apply_status(rule_id):
+    """Mark the journal rows for `rule_id` applied — after rules.json confirms it.
+
+    The check is the point. A status this script set on the strength of someone
+    saying so would be the same unverified claim a `proposed` row already is,
+    one word further along.
+    """
+    queue = queue_path()
+    if not queue.is_file():
+        print("refused: no journal at %s" % queue, file=sys.stderr)
+        return 2
+    rules = queue.parent / "rules.json"
+    if not rules.is_file():
+        print("refused: no rules file at %s — cannot confirm the rule is live" % rules,
+              file=sys.stderr)
+        return 2
+    try:
+        live = rule_ids(rules.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        print("refused: %s is not valid JSON — %s" % (rules, exc), file=sys.stderr)
+        return 2
+    if rule_id not in live:
+        print("refused: %s defines no rule with id %r. Apply the rule first — this flag "
+              "records that it happened, it does not make it true." % (rules, rule_id),
+              file=sys.stderr)
+        return 2
+
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    updated, changed = mark_applied(lines, rule_id, stamp)
+    if not changed:
+        print("nothing to do: no row for %r is still `proposed` in %s" % (rule_id, queue))
+        return 0
+    scratch = queue.with_name(queue.name + ".new")
+    scratch.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    os.replace(scratch, queue)
+    print("%d row(s) for %s marked applied in %s" % (changed, rule_id, queue))
+    return 0
+
+
 def _boom():
     """A fixture that raises, so the harness can prove it survives one."""
     raise RuntimeError("fixture blew up")
@@ -266,6 +359,30 @@ def self_test():
          lambda: only_happy([("gh pr list", "allow")]), True),
         ("one unhappy case is enough",
          lambda: only_happy([("gh pr list", "allow"), ("gh pr list; sudo id", "deny")]), False),
+        # --applied, in the two pure pieces it is made of. No journal is read and
+        # no rules file is opened, so these run in a bare checkout like the rest.
+        ("a rules body yields the ids it defines",
+         lambda: sorted(rule_ids('{"allow":[{"id":"a.b","pattern":"x"}],'
+                                 '"deny":[{"id":"c.d","pattern":"y","reason":"z"}]}')),
+         ["a.b", "c.d"]),
+        ("a rule with no id is not an id",
+         lambda: rule_ids('{"allow":[{"pattern":"x"}]}'), set()),
+        ("a proposed row for the id is marked applied",
+         lambda: json.loads(mark_applied(['{"id":"a.b","status":"proposed"}'],
+                                         "a.b", "T")[0][0])["status"], "applied"),
+        ("...and stamped with when it landed",
+         lambda: json.loads(mark_applied(['{"id":"a.b","status":"proposed"}'],
+                                         "a.b", "T")[0][0])["applied_ts"], "T"),
+        ("a row for another id is left alone",
+         lambda: mark_applied(['{"id":"x.y","status":"proposed"}'], "a.b", "T")[1], 0),
+        ("an already-applied row is not re-dated",
+         lambda: mark_applied(['{"id":"a.b","status":"applied","applied_ts":"OLD"}'],
+                              "a.b", "T")[1], 0),
+        ("every proposed row for the id is marked, not just the first",
+         lambda: mark_applied(['{"id":"a.b","status":"proposed"}',
+                               '{"id":"a.b","status":"proposed"}'], "a.b", "T")[1], 2),
+        ("a line that is not JSON survives the rewrite",
+         lambda: mark_applied(["not json"], "a.b", "T"), (["not json"], 0)),
         # the harness's own promise: a fixture that blows up is ONE failure
         ("a check that raises is reported, not fatal",
          _boom, "raised RuntimeError('fixture blew up')"),
@@ -292,6 +409,14 @@ def main():
             print("refused: --self-test takes no other arguments", file=sys.stderr)
             return 2
         return self_test()
+    if "--applied" in argv:
+        position = argv.index("--applied")
+        rest = argv[position + 1:]
+        if position != 0 or len(rest) != 1 or rest[0].startswith("-"):
+            print("refused: --applied takes exactly one rule id and no other arguments",
+                  file=sys.stderr)
+            return 2
+        return apply_status(rest[0])
 
     ap = argparse.ArgumentParser(description="Request a bash-whitelist rule.")
     ap.add_argument("--pattern", required=True,

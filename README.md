@@ -53,6 +53,12 @@ dates. And nothing that deletes is ever answered with "write it this way
 instead" — a way around a stop is not a stop. Deletion stays a prompt, and the
 prompt owes the human what, why now, what breaks, and the way back.
 
+**Asking about everything is not safety.** An allowlist that asks about every
+unfamiliar shape trains the human to approve without reading. The gate's job is
+to stop a mistaken command from destroying data, so an unvetted command can be
+routed: destructive shapes still ask, code the gate cannot read is refused to
+the agent, and the rest can run. See [Routing an `ask`](#routing-an-ask-the-gate-stops-data-loss-it-does-not-supervise).
+
 ## Install
 
 ```sh
@@ -170,6 +176,50 @@ keeping:
 
 Curate it from the same evidence as the rules: every shape on
 `--report` either earns a rule or earns an entry here.
+
+## Routing an `ask`: the gate stops data loss, it does not supervise
+
+An allowlist asks about everything it has not seen, and a person who approves
+two hundred harmless prompts a week is no longer reading them. The threat this
+gate exists for is an agent's *mistake*, and a mistake looks like an ordinary
+command — `rm` on the wrong path, `git checkout -- file`, `> file` — not like
+obfuscated shell. So `verdict()` still says whether a command is vetted, and a
+second step, `route()`, decides what an unvetted one becomes:
+
+```
+escalate match   ask the human      it deletes, overwrites, discards git work or publishes
+opaque match     refused to agent   code the gate cannot read: bash x.sh, ./x, x.py, | sh, make
+anything else    "unmatched"        allow runs it · agent refuses it with help · human asks
+```
+
+Deny and recompose rules fire first and are unchanged. An `ask` can only become
+the same `ask`, a refusal, or — under `"unmatched": "allow"` — a run, and only
+when nothing on the escalate or opaque list matched. A refusal to the agent
+carries `bash-advise`'s rewrite text and a policy: recompose and retry, and after
+two refusals for the same step, file a request and move on rather than hand the
+call to the human.
+
+```jsonc
+{
+  "unmatched": "allow",                       // default "human": the old behaviour
+  "escalate": [{"id": "human.delete", "pattern": "(^|[;&|\\n]\\s*)(rm|rmdir|unlink)\\b",
+                "why": "deletion owes the human what, why now, what breaks and the way back"}],
+  "opaque":   [{"id": "opaque.shell-script", "pattern": "(^|[;&|\\n]\\s*)(bash|sh|zsh|source)\\s+\\S",
+                "why": "runs a script the gate cannot read", "instead": "run its commands directly"}],
+  "route_cases": [["rm /tmp/x.txt", "human"], ["bash /tmp/x.sh", "agent"], ["unzip -l x.zip", "allow"]]
+}
+```
+
+`--explain` prints a `ROUTED` line whenever routing changes the verdict, and
+`--self-test` runs every `route_cases` entry. Two things to keep in mind:
+
+- **A denylist only sees what it lists.** Before switching a project to
+  `"unmatched": "allow"`, read `examples/rules.json`'s escalate list and extend it
+  with whatever destroys data in *your* toolchain (a database CLI, a cloud CLI,
+  a simulator reset). Rolling back is one line: `"unmatched": "human"`.
+- **The allow rules still matter.** A command an allow rule matches never reaches
+  `route()`, so a loose allow rule — `fetch .*`, `sed -n .*` — is still a hole even
+  when the escalate list is complete. Narrow those with deny rules.
 
 ## Writing the rules
 
